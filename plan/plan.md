@@ -15,6 +15,24 @@ Research baseline: 2026-10-05, upstream midir tag `v0.11.0`. Check released PyO3
 and maturin compatibility when implementation starts, then record the chosen
 versions and Rust minimum version in the build configuration and lockfiles.
 
+### Implementation status, 2026-10-08
+
+Slices 1 and 2 are implemented. The build uses midir 0.11.0, PyO3 0.29.3,
+maturin 1.15.0, and Rust 1.87. Cargo is the authoritative version source.
+The CPython 3.11 macOS arm64 wheel builds and imports outside the checkout,
+with its stub and typing marker included.
+
+The current API includes input/output constructors, port discovery and names,
+and output connect/close/context management. The shared ownership core tests
+failed-connect restoration, client exclusion, reuse, and concurrent teardown
+without MIDI devices. Python tests cover the installed-package contract,
+exception hierarchy, opaque-handle construction, and argument conversion.
+
+Input callbacks, sending, port identifiers/equality, filters, and virtual ports
+remain unimplemented. Native device operation and broader platform/interpreter
+validation remain unverified. The callback and finalization gates still apply to
+slices 3 and 4.
+
 ## Additional work beyond the prompt
 
 None.

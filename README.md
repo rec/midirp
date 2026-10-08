@@ -30,3 +30,28 @@ cargo fmt --check
 maturin selects the extension-module build setting for wheel builds.
 Linux source builds also require ALSA development libraries and `pkg-config`.
 No MIDI clients or devices are opened by the unit tests.
+
+## Current implementation
+
+The first two slices provide the build and ownership foundation:
+
+- Input and output clients can enumerate ports and retrieve their names.
+- An output client can connect to a discovered output port. The connection owns
+  the native resource and keeps the original Python client alive.
+- While connecting, connected, or closing, the client rejects other operations
+  with `RuntimeError`. Failed connection attempts restore the same native client.
+- `close()` restores the original client for reuse and is idempotent. Concurrent
+  close calls wait for teardown to finish. Output connections support context
+  managers; ordinary destruction also closes them.
+- Native failures use `MidiError` subclasses: `InitError`, `PortInfoError`,
+  `ConnectError`, and `SendError`. Invalid Python argument types raise `TypeError`.
+
+Output sending, input callbacks, identifiers, filters, and virtual ports are
+scheduled for later slices. `SendError` is defined for the planned send API;
+there is no send method yet. Port and connection handles cannot be constructed
+directly. Context-manager exit closes the connection and propagates body errors.
+
+Ownership transitions are tested without MIDI devices. Native discovery,
+connection, and destruction against actual OS backends have not been exercised.
+The build and installed wheel have been verified on macOS arm64 with CPython
+3.11. Broader interpreter and platform validation remains later work.
