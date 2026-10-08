@@ -1,0 +1,45 @@
+[build-system]
+requires = ["maturin==1.15.0"]
+build-backend = "maturin"
+
+[project]
+name = "midirp"
+dynamic = ["version"]
+description = "Python bindings for the midir Rust MIDI library"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "maturin==1.15.0",
+    "pytest>=8",
+    "pyupgrade>=3.19",
+    "ruff>=0.11",
+    "ty>=0.0.1",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "midirp.midi"
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+    { file = "python/midirp/*.py" },
+    { file = "python/midirp/*.pyi" },
+    { file = "python/midirp/py.typed" },
+    { file = "README.md" },
+]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ty.environment]
+python-version = "3.11"
