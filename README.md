@@ -33,9 +33,14 @@ No MIDI clients or devices are opened by the unit tests.
 
 ## Current implementation
 
-The first four slices provide the build, ownership, and callback lifecycle:
+The first five slices provide discovery, sending, ownership, and callback lifecycle:
 
-- Input and output clients can enumerate ports and retrieve their names.
+- Input and output clients can enumerate ports, retrieve their names, and find
+  ports with `find_port_by_id(id)`, returning `None` when absent.
+- Port handles provide `id()` and equality using the upstream handle. Input and
+  output handles are distinct and remain unhashable. IDs are opaque backend
+  identifiers; no extra persistence guarantee across unplugging or reboot is
+  added. Ports remain independent of their discovering client's connection state.
 - An output client can connect to a discovered output port. The connection owns
   the native resource and keeps the original Python client alive.
 - While connecting, connected, or closing, the client rejects other operations
@@ -46,13 +51,22 @@ The first four slices provide the build, ownership, and callback lifecycle:
 - Native failures use `MidiError` subclasses: `InitError`, `PortInfoError`,
   `ConnectError`, and `SendError`. Invalid Python argument types raise `TypeError`.
 
-Output sending, identifiers, filters, and virtual ports are
-scheduled for later slices. `SendError` is defined for the planned send API;
-there is no send method yet. Port and connection handles cannot be constructed
-directly. Context-manager exit closes the connection and propagates body errors.
+Output connections provide `send(message: bytes)`. Bytes are passed unchanged to
+midir, which handles MIDI message validity. Other containers, including
+`bytearray` and `memoryview`, raise `TypeError`; convert them explicitly to
+`bytes`. Native failures raise `SendError` with upstream detail and leave the
+connection open. Sending on a closed connection raises `RuntimeError`.
+Concurrent sends and close share the native resource lock with the GIL released;
+close waits for an already-running send. An input callback may send through a
+separate output connection.
+
+Filters and virtual ports remain for slice 6. Port and connection handles cannot
+be constructed directly. Context-manager exit closes the connection and
+propagates body errors.
 
 Ownership transitions are tested without MIDI devices. Native discovery,
-connection, and destruction against actual OS backends have not been exercised.
+lookup, sending, connection, and destruction against actual OS backends have not
+been exercised.
 The build and installed wheel have been verified on macOS arm64 with CPython
 3.11. Broader interpreter and platform validation remains later work.
 
@@ -83,3 +97,10 @@ bridge and resource lifecycle without opening MIDI devices. Tests include
 callback-thread destruction, cycles, concurrent close, pending opens, and actual
 CPython finalization in separate processes with deadlines. These tests do not
 establish platform backend or physical-device shutdown safety.
+
+Slice 5 unit checks cover strict immutable-byte arguments, unchanged forwarding,
+native send-error translation, continued use after failure, closed-state errors,
+send/close concurrency, and sending from a native input callback. The private
+output driver records calls through the production byte boundary and ownership
+core; it does not create or simulate an OS MIDI backend. Port identity and lookup
+use midir directly and await native-backend validation.

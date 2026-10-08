@@ -17,20 +17,20 @@ versions and Rust minimum version in the build configuration and lockfiles.
 
 ### Implementation status, 2026-10-08
 
-Slices 1 through 4 are implemented. The build uses midir 0.11.0, PyO3 0.29.3,
+Slices 1 through 5 are implemented. The build uses midir 0.11.0, PyO3 0.29.3,
 maturin 1.15.0, and Rust 1.87. Cargo is the authoritative version source.
 The CPython 3.11 macOS arm64 wheel builds and imports outside the checkout,
 with its stub and typing marker included.
 
 The current API includes input/output constructors, port discovery and names,
-and input/output connect/close/context management. The shared ownership core tests
-failed-connect restoration, client exclusion, reuse, and concurrent teardown
+input/output connect/close/context management, port IDs/equality/lookup,
+and output sending. The shared ownership core tests failed-connect restoration, client exclusion, reuse, and concurrent teardown
 without MIDI devices. Python tests cover the installed-package contract,
 exception hierarchy, opaque-handle construction, and argument conversion.
 
-Sending, port identifiers/equality, filters, and virtual ports
-remain unimplemented. Native device operation and broader platform/interpreter
-validation remain unverified. Native backend lifecycle validation remains a later gate.
+Filters and virtual ports remain unimplemented. Native device operation and
+broader platform/interpreter validation remain unverified. Native backend
+lifecycle validation remains a later gate.
 
 Slice 3 supplied the direct-delivery bridge, now compiled into the extension by
 slice 4. Callbacks receive owned bytes and unchanged timestamps on midir's
@@ -67,6 +67,25 @@ WinMM resets/stops/closes under a native handle lock. Unit tests validate the
 binding lifecycle protocol, not those platform implementations. No MIDI clients
 or devices have been opened during verification; native backend testing remains
 required before claiming runtime support.
+
+Slice 5 completes the existing discovery surface with opaque upstream `id()`,
+equality between corresponding upstream handles, and `find_port_by_id(id)` with
+`None` for a missing ID. Ports remain unhashable and direction-specific. Native
+ID, equality, and lookup calls release the GIL; unavailable-client lookup follows
+the existing state exclusion policy.
+
+Output `send(message: bytes)` accepts only immutable Python bytes, forwards them
+unchanged, and serializes native sends with close using the connection lock while
+releasing the GIL. Closed connections raise `RuntimeError`. Native failures become
+`SendError` with operation context and upstream text; they leave the connection
+open. No additional MIDI validator or buffer-container overload was introduced.
+
+Focused unit tests exercise the production byte boundary and ownership core for
+argument rejection, unchanged bytes (including empty and invalid MIDI content),
+error mapping, recovery after failed send, close during a send, and sending from
+an input callback through a separate output. The pytest deadline now covers all
+native unit tests as well as the isolated finalization checks. No device was
+opened; upstream port identity/lookup and real sending await slice 7 validation.
 
 ## Additional work beyond the prompt
 

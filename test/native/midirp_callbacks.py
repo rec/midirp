@@ -11,6 +11,10 @@ class Connection(Protocol):
     def close(self) -> None: ...
 
 
+class Output(Protocol):
+    def send(self, message: bytes) -> None: ...
+
+
 class UnraisableEvent(Protocol):
     exc_value: BaseException | None
     object: object
@@ -28,6 +32,16 @@ class Recorder:
 
     def verify_bytes(self) -> None:
         assert all(type(m) is bytes for _, m in self.messages)
+
+
+class SendingRecorder(Recorder):
+    def __init__(self, output: Output) -> None:
+        super().__init__()
+        self.output = output
+
+    def __call__(self, timestamp: int, message: bytes) -> None:
+        super().__call__(timestamp, message)
+        self.output.send(message)
 
 
 class RaisingRecorder(Recorder):
@@ -93,3 +107,14 @@ def capture_errors() -> Iterator[UnraisableRecorder]:
     recorder = UnraisableRecorder()
     with patch("sys.unraisablehook", recorder):
         yield recorder
+
+
+def verify_send_boundary(output: Output) -> None:
+    for m in (bytearray(b"x"), memoryview(b"x"), [1], (1,), "x", 1, None):
+        try:
+            output.send(m)  # ty: ignore[invalid-argument-type]
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("send accepted a non-bytes argument")
+    output.send(b"\x90\x3c\x7f")

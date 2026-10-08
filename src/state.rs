@@ -2,9 +2,10 @@ use std::mem;
 use std::sync::Mutex;
 
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::PyResult;
+use pyo3::types::{PyBytes, PyBytesMethods};
+use pyo3::{Bound, PyResult, Python};
 
-use crate::errors::ConnectError;
+use crate::errors::{ConnectError, SendError};
 
 /// Owns a client except while a connection owns its native resource.
 pub struct Client<T> {
@@ -81,6 +82,27 @@ impl<T> Connection<T> {
             .lock()
             .expect("connection lock poisoned")
             .is_none()
+    }
+
+    pub fn send(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, PyBytes>,
+        operation: impl FnOnce(&mut T, &[u8]) -> Result<(), midir::SendError> + Send,
+    ) -> PyResult<()>
+    where
+        T: Send,
+    {
+        // PyBytes owns immutable storage for the entire detached call. Extract
+        // the slice while attached, then release the GIL before taking the lock.
+        let message = message.as_bytes();
+        py.detach(|| {
+            let mut native = self.native.lock().expect("connection lock poisoned");
+            let native = native
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("MIDI connection is closed"))?;
+            operation(native, message).map_err(|error| SendError::new_err(format!("send: {error}")))
+        })
     }
 
     pub fn close<C>(&self, client: &Client<C>, operation: impl FnOnce(T) -> C) {
@@ -205,5 +227,111 @@ mod tests {
 
         assert!(connection.closed());
         assert_eq!(client.with_available(|native| Ok(*native)).unwrap(), 37);
+    }
+
+    #[test]
+    fn send_preserves_bytes_and_native_errors_without_closing_the_connection() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Client::new(Vec::<Vec<u8>>::new());
+            let connection = Connection::new();
+            client.connect(&connection, Ok).unwrap();
+            for bytes in [vec![], vec![0], vec![0x90, 60, 127], vec![0xf0, 0, 1, 0xf7]] {
+                connection
+                    .send(py, &PyBytes::new(py, &bytes), |native, message| {
+                        native.push(message.to_vec());
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            for native_error in [
+                midir::SendError::InvalidData("invalid data"),
+                midir::SendError::Other("driver error"),
+            ] {
+                let error = connection
+                    .send(py, &PyBytes::new(py, &[0xf8]), |_, _| Err(native_error))
+                    .unwrap_err();
+                assert!(error.is_instance_of::<SendError>(py));
+                assert_eq!(error.value(py).to_string(), format!("send: {native_error}"));
+                assert!(!connection.closed());
+            }
+            connection
+                .send(py, &PyBytes::new(py, &[0xf8]), |native, message| {
+                    native.push(message.to_vec());
+                    Ok(())
+                })
+                .unwrap();
+            connection.close(&client, |native| native);
+            assert_eq!(
+                client.with_available(|native| Ok(native.clone())).unwrap(),
+                vec![
+                    vec![],
+                    vec![0],
+                    vec![0x90, 60, 127],
+                    vec![0xf0, 0, 1, 0xf7],
+                    vec![0xf8]
+                ]
+            );
+            let error = connection
+                .send(py, &PyBytes::new(py, &[0xf8]), |_, _| {
+                    panic!("closed connection must not send")
+                })
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyRuntimeError>(py));
+        });
+    }
+
+    #[test]
+    fn close_waits_for_a_send_in_progress_while_python_is_released() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Client::new(Vec::<u8>::new());
+            let connection = Connection::new();
+            client.connect(&connection, Ok).unwrap();
+            let (started, sending) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            let (closing, close_started) = mpsc::channel();
+            let (done, completed) = mpsc::channel();
+            let client = &client;
+            let connection = &connection;
+            py.detach(move || {
+                thread::scope(|scope| {
+                    scope.spawn(|| {
+                        Python::attach(|py| {
+                            connection
+                                .send(
+                                    py,
+                                    &PyBytes::new(py, &[0x90, 60, 127]),
+                                    move |native, bytes| {
+                                        started.send(()).unwrap();
+                                        released.recv_timeout(Duration::from_secs(5)).unwrap();
+                                        native.extend_from_slice(bytes);
+                                        Ok(())
+                                    },
+                                )
+                                .unwrap();
+                        })
+                    });
+                    sending.recv_timeout(Duration::from_secs(5)).unwrap();
+                    scope.spawn(|| {
+                        closing.send(()).unwrap();
+                        connection.close(client, |native| native);
+                        done.send(()).unwrap();
+                    });
+                    close_started.recv_timeout(Duration::from_secs(5)).unwrap();
+                    assert_eq!(
+                        completed.recv_timeout(Duration::from_millis(50)),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    );
+                    release.send(()).unwrap();
+                    completed.recv_timeout(Duration::from_secs(5)).unwrap();
+                })
+            });
+            assert!(connection.closed());
+            assert_eq!(
+                client.with_available(|native| Ok(native.clone())).unwrap(),
+                vec![0x90, 60, 127]
+            );
+        });
     }
 }

@@ -577,6 +577,29 @@ mod tests {
     }
 
     #[test]
+    fn native_input_callback_can_send_through_a_separate_output_connection() {
+        let _test = TEST_LOCK.lock().unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let output = crate::output::tests::OutputDriver::new(py);
+            let recorder = fixtures(py)
+                .getattr("SendingRecorder")
+                .unwrap()
+                .call1((output.bind(py),))
+                .unwrap();
+            let (input, commands) = driver(py, &recorder, None);
+            let delivered = emit(&commands, 37, vec![0xf0, 0, 1, 0xf7]);
+            py.detach(move || delivered.recv_timeout(DEADLINE).unwrap());
+            input.get().close(py).unwrap();
+            assert_eq!(
+                *output.get().messages.lock().unwrap(),
+                vec![vec![0xf0, 0, 1, 0xf7]]
+            );
+            output.bind(py).call_method0("close").unwrap();
+        });
+    }
+
+    #[test]
     #[ignore = "must run alone in a fresh process: finalizes CPython"]
     fn interpreter_finalization_drains_a_live_input() {
         let (stopped, receiver) = mpsc::channel();

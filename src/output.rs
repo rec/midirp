@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::callback::check_close_thread;
@@ -22,6 +23,19 @@ pub struct MidiOutputPort {
 
 #[pymethods]
 impl MidiOutputPort {
+    /// The backend's opaque identifier; no additional persistence guarantee.
+    fn id(&self, py: Python<'_>) -> String {
+        py.detach(|| self.native.id())
+    }
+
+    fn __eq__(&self, py: Python<'_>, other: &Self) -> bool {
+        py.detach(|| self.native == other.native)
+    }
+
+    fn __ne__(&self, py: Python<'_>, other: &Self) -> bool {
+        py.detach(|| self.native != other.native)
+    }
+
     #[classattr]
     const __hash__: Option<Py<PyAny>> = None;
 }
@@ -67,6 +81,16 @@ impl MidiOutput {
         })
     }
 
+    fn find_port_by_id(&self, py: Python<'_>, id: &str) -> PyResult<Option<MidiOutputPort>> {
+        py.detach(|| {
+            self.state.with_available(|native| {
+                Ok(native
+                    .find_port_by_id(id)
+                    .map(|native| MidiOutputPort { native }))
+            })
+        })
+    }
+
     fn connect(
         slf: Py<Self>,
         py: Python<'_>,
@@ -98,6 +122,13 @@ impl MidiOutput {
 
 #[pymethods]
 impl MidiOutputConnection {
+    /// Send immutable bytes unchanged, serialized with native close.
+    fn send(&self, py: Python<'_>, message: &Bound<'_, PyBytes>) -> PyResult<()> {
+        self.resource
+            .native
+            .send(py, message, midir::MidiOutputConnection::send)
+    }
+
     /// Close once and restore the original client. Waits for concurrent close.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         check_close_thread()?;
@@ -141,5 +172,88 @@ impl MidiOutputConnection {
 impl Drop for MidiOutputConnection {
     fn drop(&mut self) {
         lifecycle::defer(self.resource.clone());
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::state::Connection;
+
+    /// Records calls through the production bytes boundary and connection gate.
+    /// No MIDI backend is created or simulated.
+    #[pyclass(frozen)]
+    pub(crate) struct OutputDriver {
+        connection: Connection<()>,
+        client: Client<()>,
+        pub(crate) messages: Mutex<Vec<Vec<u8>>>,
+    }
+
+    #[pymethods]
+    impl OutputDriver {
+        fn send(&self, py: Python<'_>, message: &Bound<'_, PyBytes>) -> PyResult<()> {
+            self.connection.send(py, message, |(), bytes| {
+                self.messages.lock().unwrap().push(bytes.to_vec());
+                Ok(())
+            })
+        }
+
+        fn close(&self, py: Python<'_>) -> PyResult<()> {
+            check_close_thread()?;
+            py.detach(|| self.connection.close(&self.client, |()| ()));
+            Ok(())
+        }
+    }
+
+    impl OutputDriver {
+        pub(crate) fn new(py: Python<'_>) -> Py<Self> {
+            let driver = Py::new(
+                py,
+                Self {
+                    connection: Connection::new(),
+                    client: Client::new(()),
+                    messages: Mutex::new(Vec::new()),
+                },
+            )
+            .unwrap();
+            driver
+                .get()
+                .client
+                .connect(&driver.get().connection, Ok)
+                .unwrap();
+            driver
+        }
+    }
+
+    #[test]
+    fn send_rejects_mutable_buffers_and_other_non_bytes_arguments() {
+        Python::initialize();
+        Python::attach(|py| {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test/native");
+            PyModule::import(py, "sys")
+                .unwrap()
+                .getattr("path")
+                .unwrap()
+                .call_method1("insert", (0, path.to_str().unwrap()))
+                .unwrap();
+            let driver = OutputDriver::new(py);
+            PyModule::import(py, "midirp_callbacks")
+                .unwrap()
+                .call_method1("verify_send_boundary", (driver.bind(py),))
+                .unwrap();
+            assert_eq!(
+                *driver.get().messages.lock().unwrap(),
+                vec![vec![0x90, 60, 127]]
+            );
+            driver.get().close(py).unwrap();
+            let error = driver
+                .bind(py)
+                .call_method1("send", (PyBytes::new(py, &[0xf8]),))
+                .unwrap_err();
+            assert!(error.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
+        });
     }
 }

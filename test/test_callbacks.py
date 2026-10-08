@@ -36,7 +36,7 @@ def test_native_callback_lifecycle_completes_without_deadlock() -> None:
     ]
     (executable,) = artifacts
     subprocess.run(
-        [executable, "callback::tests", "--test-threads=1"],
+        [executable, "--test-threads=1"],
         cwd=project,
         env=environment,
         check=True,

@@ -22,6 +22,19 @@ pub struct MidiInputPort {
 
 #[pymethods]
 impl MidiInputPort {
+    /// The backend's opaque identifier; no additional persistence guarantee.
+    fn id(&self, py: Python<'_>) -> String {
+        py.detach(|| self.native.id())
+    }
+
+    fn __eq__(&self, py: Python<'_>, other: &Self) -> bool {
+        py.detach(|| self.native == other.native)
+    }
+
+    fn __ne__(&self, py: Python<'_>, other: &Self) -> bool {
+        py.detach(|| self.native != other.native)
+    }
+
     #[classattr]
     const __hash__: Option<Py<PyAny>> = None;
 }
@@ -56,6 +69,16 @@ impl MidiInput {
                 native
                     .port_name(&port.native)
                     .map_err(|error| PortInfoError::new_err(format!("input port name: {error}")))
+            })
+        })
+    }
+
+    fn find_port_by_id(&self, py: Python<'_>, id: &str) -> PyResult<Option<MidiInputPort>> {
+        py.detach(|| {
+            self.state.with_available(|native| {
+                Ok(native
+                    .find_port_by_id(id)
+                    .map(|native| MidiInputPort { native }))
             })
         })
     }
