@@ -44,7 +44,6 @@ references and function names refer to that pinned source, not a newer release.
 
 | ID | Severity | Evidence | Concern |
 | --- | --- | --- | --- |
-| L1 | High | Confirmed in source | Native calls and callback draining have no deadline; WinMM sends have explicit unlimited retry loops. |
 | L2 | High | Confirmed design; possible stall | One cleanup worker makes a stuck close delay every queued automatic close. |
 | L3 | High | Possible | Application wait cycles and callback output reentrancy can deadlock despite the close guard. |
 | L4 | High | Confirmed in source | Panic paths bypass ownership restoration and can poison locks or terminate cleanup. |
@@ -60,37 +59,10 @@ references and function names refer to that pinned source, not a newer release.
 
 ## Liveness, concurrency, and shutdown
 
-### L1. Blocking operations have no bound
-
-**Confirmed in source.** Discovery and metadata calls execute while holding the
-client-state mutex. Send executes while holding the connection mutex. Close
-holds that mutex across native teardown, and input close first waits for all
-admitted callback deliveries. These waits release the GIL, which lets unrelated
-Python code run, but they have no timeout or cancellation mechanism.
-
-In midir's [WinMM output implementation](https://github.com/Boddlnagg/midir/blob/v0.11.0/src/backend/winmm/mod.rs),
-`send()` repeatedly sleeps for 1 ms and retries `MIDIERR_NOTREADY`, for both
-short messages and SysEx. SysEx unpreparation also retries
-`MIDIERR_STILLPLAYING` without a limit. A driver that keeps returning either
-status can make send wait forever. A thread trying to close that connection,
-read `closed`, or leave its context manager then waits behind the same lock.
-Interpreter shutdown can wait behind it too.
-
-An input callback or `sys.unraisablehook` that never returns prevents draining.
-Native open, enumeration, teardown, and OS calls can also hang independently of
-Python. On ALSA, input teardown writes a stop request without checking its
-result and joins the reader thread; a failed wakeup can leave a join waiting.
-The upstream source itself notes slow unsubscribe behavior before any input.
-
-**Consequence:** no general bounded shutdown or responsiveness guarantee.
-`closed` is not a cheap, nonblocking health probe. A Python timeout around a
-worker thread cannot cancel a native operation already in progress.
-
-**Proposed investigation:** deadline-bounded subprocess cases for permanently
-busy output, failed wakeup, blocked metadata, and blocked callbacks. Establish
-backend cancellation guarantees before proposing deadlines inside the binding;
-abandoning a live native handle or thread is not safe cancellation. Applications
-requiring a hard recovery boundary may need a separate MIDI process.
+Agreed approach: retain the in-process binding and reduce avoidable waits.
+Guaranteed native-operation or shutdown deadlines would require process
+isolation and remain outside this implementation. L issues are handled
+sequentially, with focused device-free checks and separate commits.
 
 ### L2. Cleanup has a global bottleneck and unbounded backlog
 
@@ -133,8 +105,6 @@ Examples of remaining wait cycles:
   blocking `put()` introduces this liveness risk.
 - A callback sends through an output whose send path or destination waits for
   that callback to finish. Connection locking can then participate in a cycle.
-- A callback calls `closed` on a connection whose native lock is held by an
-  operation waiting for the callback. The close guard does not cover this getter.
 
 CoreMIDI holds its handler-data mutex across user delivery. If a native virtual
 send synchronously reenters that same input handler, recursive forwarding can

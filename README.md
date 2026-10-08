@@ -140,9 +140,13 @@ and selected separately if needed.
 
 A connection owns its native resource and keeps its original Python client alive.
 While connecting, connected, or closing, that client rejects other operations.
+Concurrent discovery, metadata, or configuration on the same client raises
+`RuntimeError` immediately if another client operation is in progress.
 Failed opens restore the same native client. `close()` is synchronous and
 idempotent, restores the client for reuse, and waits for concurrent teardown.
-`closed` reports connection state. Context-manager exit closes the connection
+`closed` is a nonblocking ownership-state snapshot. It remains false during
+teardown and becomes true after client restoration; it does not report device
+health. Context-manager exit closes the connection
 and propagates body exceptions. Handles cannot be constructed directly.
 
 | Failure | Exception |
@@ -153,12 +157,20 @@ and propagates body exceptions. Handles cannot be constructed directly.
 | Sending | `SendError` |
 | Wrong argument type/direction | `TypeError` |
 | Unknown filter bits | `ValueError` |
-| Unavailable client, closed connection, callback-thread close | `RuntimeError` |
+| Busy/unavailable client, closed connection, callback-thread close | `RuntimeError` |
 | Virtual ports on Windows | `NotImplementedError` |
 
 The four native errors inherit from `MidiError` and retain upstream detail.
 There is no automatic retry, reconnection, or promise of immediate unplug
 detection. Handle device failures in the application.
+
+Native open, discovery, send, and close have no guaranteed completion deadline.
+For example, WinMM can retry indefinitely while a driver stays busy. A callback
+or error hook that never returns can also prevent close and interpreter shutdown.
+Releasing the GIL allows other Python threads to run; it cannot cancel a hung
+native call or stop arbitrary callback code. A timeout around a calling thread
+does not cancel its operation. Applications requiring guaranteed recovery from
+these failures need a separate process boundary.
 
 Import starts one native cleanup worker for the main interpreter, without
 initializing a MIDI backend. The worker only tears down resources; callbacks

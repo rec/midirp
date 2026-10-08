@@ -1,5 +1,6 @@
 use std::mem;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::{PyBytes, PyBytesMethods};
@@ -15,6 +16,7 @@ pub struct Client<T> {
 /// Serializes native teardown so every close caller waits for completion.
 pub struct Connection<T> {
     native: Mutex<Option<T>>,
+    closed: AtomicBool,
 }
 
 impl<T> Client<T> {
@@ -25,7 +27,7 @@ impl<T> Client<T> {
     }
 
     pub fn with_available<R>(&self, operation: impl FnOnce(&mut T) -> PyResult<R>) -> PyResult<R> {
-        let mut state = self.state.lock().expect("client state lock poisoned");
+        let mut state = self.try_state()?;
         match &mut *state {
             ClientState::Available(native) => operation(native),
             _ => Err(PyRuntimeError::new_err(
@@ -40,7 +42,7 @@ impl<T> Client<T> {
         operation: impl FnOnce(T) -> Result<R, midir::ConnectError<T>>,
     ) -> PyResult<()> {
         let native = {
-            let mut state = self.state.lock().expect("client state lock poisoned");
+            let mut state = self.try_state()?;
             if !matches!(*state, ClientState::Available(_)) {
                 return Err(PyRuntimeError::new_err(
                     "MIDI client is unavailable while connecting, connected, or closing",
@@ -56,7 +58,11 @@ impl<T> Client<T> {
         // Native connect may block. Do not hold the client lock across it.
         match operation(native) {
             Ok(native) => {
-                *connection.native.lock().expect("connection lock poisoned") = Some(native);
+                {
+                    let mut handle = connection.native.lock().expect("connection lock poisoned");
+                    *handle = Some(native);
+                    connection.closed.store(false, Ordering::Release);
+                }
                 *self.state.lock().expect("client state lock poisoned") = ClientState::Connected;
                 Ok(())
             }
@@ -68,20 +74,28 @@ impl<T> Client<T> {
             }
         }
     }
+
+    fn try_state(&self) -> PyResult<MutexGuard<'_, ClientState<T>>> {
+        match self.state.try_lock() {
+            Ok(state) => Ok(state),
+            Err(TryLockError::WouldBlock) => Err(PyRuntimeError::new_err(
+                "MIDI client is busy with another operation",
+            )),
+            Err(TryLockError::Poisoned(_)) => panic!("client state lock poisoned"),
+        }
+    }
 }
 
 impl<T> Connection<T> {
     pub fn new() -> Self {
         Self {
             native: Mutex::new(None),
+            closed: AtomicBool::new(true),
         }
     }
 
     pub fn closed(&self) -> bool {
-        self.native
-            .lock()
-            .expect("connection lock poisoned")
-            .is_none()
+        self.closed.load(Ordering::Acquire)
     }
 
     pub fn send(
@@ -112,6 +126,8 @@ impl<T> Connection<T> {
             let restored = operation(connection);
             *client.state.lock().expect("client state lock poisoned") =
                 ClientState::Available(restored);
+            // Publish completion only after the original client is available again.
+            self.closed.store(true, Ordering::Release);
         }
     }
 }
@@ -225,6 +241,77 @@ mod tests {
             done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         });
 
+        assert!(connection.closed());
+        assert_eq!(client.with_available(|native| Ok(*native)).unwrap(), 37);
+    }
+
+    #[test]
+    fn concurrent_client_operations_reject_use_without_waiting_for_the_backend() {
+        let client = Client::new(37);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let client = &client;
+            scope.spawn(move || {
+                client
+                    .with_available(|_| {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            scope.spawn(move || {
+                let metadata: PyResult<()> =
+                    client.with_available(|_| panic!("busy client must reject use"));
+                let connect = client.connect(&Connection::<()>::new(), |_| {
+                    panic!("busy client must reject connect")
+                });
+                result_tx.send((metadata, connect)).unwrap();
+            });
+            let result = result_rx.recv_timeout(Duration::from_secs(1));
+            release_tx.send(()).unwrap();
+            let (metadata, connect): (PyResult<()>, PyResult<()>) = result.unwrap();
+            Python::initialize();
+            Python::attach(|py| {
+                for error in [metadata.unwrap_err(), connect.unwrap_err()] {
+                    assert!(error.is_instance_of::<PyRuntimeError>(py));
+                    assert_eq!(
+                        error.value(py).to_string(),
+                        "MIDI client is busy with another operation"
+                    );
+                }
+            });
+        });
+        assert_eq!(client.with_available(|native| Ok(*native)).unwrap(), 37);
+    }
+
+    #[test]
+    fn closed_reports_without_waiting_and_remains_false_until_teardown_completes() {
+        let client = Client::new(37);
+        let connection = Connection::new();
+        client.connect(&connection, Ok).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let client = &client;
+            let connection = &connection;
+            scope.spawn(move || {
+                connection.close(client, |native| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    native
+                });
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            scope.spawn(move || result_tx.send(connection.closed()).unwrap());
+            let result = result_rx.recv_timeout(Duration::from_secs(1));
+            release_tx.send(()).unwrap();
+            assert!(!result.unwrap());
+        });
         assert!(connection.closed());
         assert_eq!(client.with_available(|native| Ok(*native)).unwrap(), 37);
     }
@@ -362,6 +449,7 @@ mod tests {
                         })
                     });
                     sending.recv_timeout(Duration::from_secs(5)).unwrap();
+                    assert!(!connection.closed());
                     scope.spawn(|| {
                         closing.send(()).unwrap();
                         connection.close(client, |native| native);

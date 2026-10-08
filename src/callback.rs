@@ -149,7 +149,7 @@ mod tests {
     use std::path::Path;
     use std::sync::{mpsc, Arc};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use pyo3::types::PyList;
 
@@ -505,9 +505,15 @@ mod tests {
             drop(driver);
             py.detach(move || {
                 receiver.recv_timeout(DEADLINE).unwrap();
-                // The stop signal precedes client restoration. Taking the
-                // connection lock waits for automatic cleanup to complete.
-                assert!(resource.native.closed());
+                // The native stop signal precedes publication of completed cleanup.
+                let deadline = Instant::now() + DEADLINE;
+                while !resource.native.closed() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "automatic cleanup did not finish"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
             });
             assert_eq!(client.with_available(|()| Ok(37)).unwrap(), 37);
         });
@@ -569,7 +575,14 @@ mod tests {
             py.detach(move || {
                 delivered.recv_timeout(DEADLINE).unwrap();
                 receiver.recv_timeout(DEADLINE).unwrap();
-                assert!(resource.native.closed());
+                let deadline = Instant::now() + DEADLINE;
+                while !resource.native.closed() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "automatic cleanup did not finish"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
             });
             assert!(reference.call0().unwrap().is_none());
             assert_eq!(client.with_available(|()| Ok(37)).unwrap(), 37);
