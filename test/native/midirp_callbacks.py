@@ -1,6 +1,6 @@
 """Python callables used by the private Rust native-thread callback driver."""
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from threading import Event, get_ident
 from typing import Protocol
@@ -42,6 +42,21 @@ class SendingRecorder(Recorder):
     def __call__(self, timestamp: int, message: bytes) -> None:
         super().__call__(timestamp, message)
         self.output.send(message)
+
+
+class ConstructorRecorder(Recorder):
+    def __init__(self, constructors: list[Callable[[str], object]]) -> None:
+        super().__init__()
+        self.constructors = constructors
+        self.errors: list[str] = []
+
+    def __call__(self, timestamp: int, message: bytes) -> None:
+        super().__call__(timestamp, message)
+        for c in self.constructors:
+            try:
+                c("callback")
+            except RuntimeError as e:
+                self.errors.append(str(e))
 
 
 class RaisingRecorder(Recorder):
@@ -91,6 +106,8 @@ class UnraisableRecorder:
         self.objects: list[object] = []
         self.targets: list[Connection] = []
         self.close_errors: list[str] = []
+        self.outputs: list[Output] = []
+        self.send_errors: list[str] = []
 
     def __call__(self, event: UnraisableEvent) -> None:
         self.errors.append(str(event.exc_value))
@@ -100,6 +117,11 @@ class UnraisableRecorder:
                 t.close()
             except RuntimeError as e:
                 self.close_errors.append(str(e))
+        for o in self.outputs:
+            try:
+                o.send(b"\xf8")
+            except RuntimeError as e:
+                self.send_errors.append(str(e))
 
 
 @contextmanager

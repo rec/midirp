@@ -89,10 +89,10 @@ impl Callback {
     }
 }
 
-pub fn check_close_thread() -> PyResult<()> {
+pub fn check_blocking_thread() -> PyResult<()> {
     if IN_CALLBACK.get() {
         return Err(PyRuntimeError::new_err(
-            "Cannot close a MIDI connection from a callback; close it from the controlling thread",
+            "Cannot perform blocking MIDI operations from a callback; use the controlling thread",
         ));
     }
     Ok(())
@@ -171,7 +171,7 @@ mod tests {
     #[pymethods]
     impl InputDriver {
         fn close(&self, py: Python<'_>) -> PyResult<()> {
-            check_close_thread()?;
+            check_blocking_thread()?;
             self.resource.retire();
             py.detach(|| self.resource.close());
             Ok(())
@@ -590,11 +590,16 @@ mod tests {
     }
 
     #[test]
-    fn native_input_callback_can_send_through_a_separate_output_connection() {
+    fn callback_and_error_hook_cannot_send_but_the_controlling_thread_can() {
         let _test = TEST_LOCK.lock().unwrap();
         Python::initialize();
         Python::attach(|py| {
             let output = crate::output::tests::OutputDriver::new(py);
+            let context = fixtures(py).call_method0("capture_errors").unwrap();
+            let errors = context.call_method0("__enter__").unwrap();
+            errors
+                .setattr("outputs", vec![output.clone_ref(py)])
+                .unwrap();
             let recorder = fixtures(py)
                 .getattr("SendingRecorder")
                 .unwrap()
@@ -604,11 +609,67 @@ mod tests {
             let delivered = emit(&commands, 37, vec![0xf0, 0, 1, 0xf7]);
             py.detach(move || delivered.recv_timeout(DEADLINE).unwrap());
             input.get().close(py).unwrap();
-            assert_eq!(
-                *output.get().messages.lock().unwrap(),
-                vec![vec![0xf0, 0, 1, 0xf7]]
-            );
+            assert!(output.get().messages.lock().unwrap().is_empty());
+            let reports: Vec<String> = errors.getattr("errors").unwrap().extract().unwrap();
+            let hook_errors: Vec<String> =
+                errors.getattr("send_errors").unwrap().extract().unwrap();
+            assert_eq!(reports.len(), 1);
+            assert_eq!(hook_errors, reports);
+            assert!(reports[0].contains("controlling thread"));
+            context
+                .call_method1("__exit__", (py.None(), py.None(), py.None()))
+                .unwrap();
+            output
+                .bind(py)
+                .call_method1("send", (PyBytes::new(py, &[0xf8]),))
+                .unwrap();
+            assert_eq!(*output.get().messages.lock().unwrap(), vec![vec![0xf8]]);
             output.bind(py).call_method0("close").unwrap();
+        });
+    }
+
+    #[test]
+    fn callbacks_reject_native_client_creation_before_initializing_a_backend() {
+        let _test = TEST_LOCK.lock().unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let recorder = fixtures(py)
+                .getattr("ConstructorRecorder")
+                .unwrap()
+                .call1((vec![
+                    py.get_type::<crate::input::MidiInput>().into_any(),
+                    py.get_type::<crate::output::MidiOutput>().into_any(),
+                ],))
+                .unwrap();
+            let (input, commands) = driver(py, &recorder, None);
+            let delivered = emit(&commands, 1, vec![0xf8]);
+            py.detach(move || delivered.recv_timeout(DEADLINE).unwrap());
+            input.get().close(py).unwrap();
+            let errors: Vec<String> = recorder.getattr("errors").unwrap().extract().unwrap();
+            assert_eq!(errors.len(), 2);
+            assert!(errors
+                .iter()
+                .all(|error| error.contains("controlling thread")));
+        });
+    }
+
+    #[test]
+    fn callback_rejects_discovery_configuration_and_opening_before_native_work() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Client::new(37);
+            let connection = crate::state::Connection::<i32>::new();
+            let resource = Managed::new(Arc::new(Client::new(19)), None, |value: i32| value);
+            let _callback = CallbackThread::enter();
+            let discovery: PyResult<()> = client.with_available(|_| panic!("must not enumerate"));
+            let configure: PyResult<()> = client.with_available(|_| panic!("must not configure"));
+            let connect = client.connect(&connection, |_| panic!("must not open"));
+            let virtual_open = resource.connect(|_| panic!("must not open"));
+            for error in [discovery, configure, connect, virtual_open] {
+                let error = error.unwrap_err();
+                assert!(error.is_instance_of::<PyRuntimeError>(py));
+                assert!(error.value(py).to_string().contains("controlling thread"));
+            }
         });
     }
 

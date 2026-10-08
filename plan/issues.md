@@ -44,7 +44,6 @@ references and function names refer to that pinned source, not a newer release.
 
 | ID | Severity | Evidence | Concern |
 | --- | --- | --- | --- |
-| L3 | High | Possible | Application wait cycles and callback output reentrancy can deadlock despite the close guard. |
 | L4 | High | Confirmed in source | Panic paths bypass ownership restoration and can poison locks or terminate cleanup. |
 | B1 | High | Confirmed in source | ALSA input thread-start failure returns a client with its sequencer missing. |
 | B2 | Medium | Confirmed in source | Failed ALSA opens can leave queues or ports allocated on the restored client. |
@@ -62,40 +61,6 @@ Agreed approach: retain the in-process binding and reduce avoidable waits.
 Guaranteed native-operation or shutdown deadlines would require process
 isolation and remain outside this implementation. L issues are handled
 sequentially, with focused device-free checks and separate commits.
-
-### L3. The callback-thread close guard cannot prevent all deadlocks
-
-**Possible; not reproduced on the OS backends.** Calling any connection's
-`close()` directly from a MIDI callback or its error hook raises `RuntimeError`.
-This prevents direct close/join self-deadlock. It does not detect other threads'
-dependencies or block all operations that can wait.
-
-Examples of remaining wait cycles:
-
-- The controlling thread closes input while holding an application lock. Its
-  callback needs that lock to finish. Close waits for the callback forever.
-- A callback waits for a thread that is itself waiting for input close, or
-  joins a thread spawned to perform that close.
-- A callback puts into a full bounded queue. Its only consumer has stopped
-  consuming to close the connection. A bounded queue limits memory but a
-  blocking `put()` introduces this liveness risk.
-- A callback sends through an output whose send path or destination waits for
-  that callback to finish. Connection locking can then participate in a cycle.
-
-CoreMIDI holds its handler-data mutex across user delivery. If a native virtual
-send synchronously reenters that same input handler, recursive forwarding can
-wait on its already-held mutex before reaching the Python bridge. Whether that
-occurs depends on OS delivery scheduling. The README permits output sends from
-callbacks; that permission does not establish safety for arbitrary routing
-graphs or backend reentrancy.
-
-**Application discipline:** keep callbacks short; hand work to a consumer that
-continues running until draining finishes; avoid blocking waits, application
-locks shared with closers, and recursive MIDI forwarding in callbacks. Decide
-an explicit overflow policy when using a bounded queue.
-
-**Proposed investigation:** isolated subprocess reproductions of wait cycles,
-virtual feedback, cross-connection forwarding, and callback health probes.
 
 ### L4. Panics are not ordinary MIDI errors or transactional failures
 
@@ -142,6 +107,10 @@ application waits or faulty drivers.
 ### L6. Interpreter shutdown and process lifecycle have additional constraints
 
 **API limitation and possible hangs.** Cleanup runs through Python `atexit`.
+Application callback waits can still deadlock draining: a callback must not
+wait for its closer, acquire a lock held by its closer, or block on a full queue
+whose consumer has stopped to close input. The MIDI API guard does not detect
+application synchronization or calls into other libraries.
 The bounded four-worker pool cannot progress if all workers are stuck in native
 teardown or callback draining. Native calls have no safe general cancellation
 mechanism; bounded shutdown still requires process isolation.

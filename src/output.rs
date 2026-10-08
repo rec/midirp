@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::{PyTraverseError, PyVisit};
 
-use crate::callback::check_close_thread;
+use crate::callback::check_blocking_thread;
 use crate::errors::{InitError, PortInfoError};
 use crate::lifecycle::{self, Managed, Resource};
 use crate::state::Client;
@@ -26,16 +26,19 @@ pub struct MidiOutputPort {
 #[pymethods]
 impl MidiOutputPort {
     /// The backend's opaque identifier; no additional persistence guarantee.
-    fn id(&self, py: Python<'_>) -> String {
-        py.detach(|| self.native.id())
+    fn id(&self, py: Python<'_>) -> PyResult<String> {
+        check_blocking_thread()?;
+        Ok(py.detach(|| self.native.id()))
     }
 
-    fn __eq__(&self, py: Python<'_>, other: &Self) -> bool {
-        py.detach(|| self.native == other.native)
+    fn __eq__(&self, py: Python<'_>, other: &Self) -> PyResult<bool> {
+        check_blocking_thread()?;
+        Ok(py.detach(|| self.native == other.native))
     }
 
-    fn __ne__(&self, py: Python<'_>, other: &Self) -> bool {
-        py.detach(|| self.native != other.native)
+    fn __ne__(&self, py: Python<'_>, other: &Self) -> PyResult<bool> {
+        check_blocking_thread()?;
+        Ok(py.detach(|| self.native != other.native))
     }
 
     #[classattr]
@@ -53,6 +56,7 @@ pub struct MidiOutputConnection {
 impl MidiOutput {
     #[new]
     fn new(py: Python<'_>, client_name: &str) -> PyResult<Self> {
+        check_blocking_thread()?;
         let native = py
             .detach(|| midir::MidiOutput::new(client_name))
             .map_err(|error| InitError::new_err(format!("create output: {error}")))?;
@@ -108,6 +112,7 @@ impl MidiOutput {
         py: Python<'_>,
         port_name: &str,
     ) -> PyResult<Py<MidiOutputConnection>> {
+        check_blocking_thread()?;
         #[cfg(unix)]
         {
             MidiOutputConnection::open(py, slf, |native| native.create_virtual(port_name))
@@ -133,7 +138,7 @@ impl MidiOutputConnection {
 
     /// Close once and restore the original client. Waits for concurrent close.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        check_close_thread()?;
+        check_blocking_thread()?;
         py.detach(|| self.resource.close());
         Ok(())
     }
@@ -181,6 +186,7 @@ impl MidiOutputConnection {
                 -> Result<midir::MidiOutputConnection, midir::ConnectError<midir::MidiOutput>>
             + Send,
     ) -> PyResult<Py<Self>> {
+        check_blocking_thread()?;
         // Allocate first: a Python allocation failure must not consume the client.
         let connection = Py::new(
             py,
@@ -232,7 +238,7 @@ pub(crate) mod tests {
         }
 
         fn close(&self, py: Python<'_>) -> PyResult<()> {
-            check_close_thread()?;
+            check_blocking_thread()?;
             py.detach(|| self.connection.close(&self.client, |()| ()));
             Ok(())
         }

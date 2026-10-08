@@ -5,7 +5,7 @@ use midir::os::unix::VirtualInput;
 use pyo3::prelude::*;
 use pyo3::{PyTraverseError, PyVisit};
 
-use crate::callback::{check_close_thread, Callback};
+use crate::callback::{check_blocking_thread, Callback};
 use crate::errors::{InitError, PortInfoError};
 use crate::ignore::Ignore;
 use crate::lifecycle::{self, Managed, Resource};
@@ -26,16 +26,19 @@ pub struct MidiInputPort {
 #[pymethods]
 impl MidiInputPort {
     /// The backend's opaque identifier; no additional persistence guarantee.
-    fn id(&self, py: Python<'_>) -> String {
-        py.detach(|| self.native.id())
+    fn id(&self, py: Python<'_>) -> PyResult<String> {
+        check_blocking_thread()?;
+        Ok(py.detach(|| self.native.id()))
     }
 
-    fn __eq__(&self, py: Python<'_>, other: &Self) -> bool {
-        py.detach(|| self.native == other.native)
+    fn __eq__(&self, py: Python<'_>, other: &Self) -> PyResult<bool> {
+        check_blocking_thread()?;
+        Ok(py.detach(|| self.native == other.native))
     }
 
-    fn __ne__(&self, py: Python<'_>, other: &Self) -> bool {
-        py.detach(|| self.native != other.native)
+    fn __ne__(&self, py: Python<'_>, other: &Self) -> PyResult<bool> {
+        check_blocking_thread()?;
+        Ok(py.detach(|| self.native != other.native))
     }
 
     #[classattr]
@@ -46,6 +49,7 @@ impl MidiInputPort {
 impl MidiInput {
     #[new]
     fn new(py: Python<'_>, client_name: &str) -> PyResult<Self> {
+        check_blocking_thread()?;
         let native = py
             .detach(|| midir::MidiInput::new(client_name))
             .map_err(|error| InitError::new_err(format!("create input: {error}")))?;
@@ -119,6 +123,7 @@ impl MidiInput {
         port_name: &str,
         callback: Py<PyAny>,
     ) -> PyResult<Py<MidiInputConnection>> {
+        check_blocking_thread()?;
         #[cfg(unix)]
         {
             MidiInputConnection::open(py, slf, callback, |native, callback| {
@@ -149,7 +154,7 @@ pub struct MidiInputConnection {
 #[pymethods]
 impl MidiInputConnection {
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        check_close_thread()?;
+        check_blocking_thread()?;
         self.resource.retire();
         py.detach(|| self.resource.close());
         Ok(())
@@ -205,6 +210,7 @@ impl MidiInputConnection {
                 -> Result<midir::MidiInputConnection<()>, midir::ConnectError<midir::MidiInput>>
             + Send,
     ) -> PyResult<Py<Self>> {
+        check_blocking_thread()?;
         let callback = Arc::new(Callback::new(py, callable)?);
         let resource = Arc::new(Managed::new(
             Arc::clone(&client.get().state),

@@ -100,9 +100,17 @@ to `sys.unraisablehook` with the callable as context; later messages still arriv
 Keep callbacks short. The GIL, OS scheduling, and backend buffers prevent hard
 real-time guarantees or a promise of no loss under load. The example uses an
 application-owned queue; the binding provides no buffering or queue API.
-A callback may send through a separate output connection. Calling any
-connection's `close()` from a MIDI callback or its error hook raises
-`RuntimeError`; signal the controlling thread to close it instead.
+Blocking MIDI operations from a callback or its error hook raise `RuntimeError`
+before entering the backend or waiting for a native lock. This includes client
+creation, discovery, metadata, port IDs/comparisons, filter changes, opening,
+sending, and closing, even on an unrelated connection. Hand those operations
+to the controlling thread. Reading `closed` and manipulating `Ignore` flags
+remain allowed because they do not wait for native work.
+
+The guard cannot police application locks, queues, or calls into other libraries.
+Do not wait for a thread that is closing input, or block on a full queue whose
+consumer has stopped to close it. Keep consumers running until draining finishes,
+and choose an explicit queue overflow policy.
 
 The default filter is `Ignore.NONE`. Combine `SYSEX`, `TIME`, and `ACTIVE_SENSE`
 with `|`. `Ignore.ALL` combines these three filters; note messages still arrive.
@@ -157,7 +165,7 @@ and propagates body exceptions. Handles cannot be constructed directly.
 | Sending | `SendError` |
 | Wrong argument type/direction | `TypeError` |
 | Unknown filter bits | `ValueError` |
-| Busy/unavailable client, closed connection, callback-thread close | `RuntimeError` |
+| Busy/unavailable client, closed connection, blocking MIDI call from callback | `RuntimeError` |
 | Virtual ports on Windows | `NotImplementedError` |
 
 The four native errors inherit from `MidiError` and retain upstream detail.

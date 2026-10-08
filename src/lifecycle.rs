@@ -51,6 +51,7 @@ impl<C, N> Managed<C, N> {
         &self,
         operation: impl FnOnce(C) -> Result<N, midir::ConnectError<C>>,
     ) -> PyResult<()> {
+        crate::callback::check_blocking_thread()?;
         // Shutdown can see registration before native connect returns.
         let closed = self.opening.lock().expect("opening lock poisoned");
         if *closed {
@@ -148,7 +149,7 @@ pub fn defer(resource: Arc<dyn Resource>) {
 
 #[pyfunction]
 fn shutdown(py: Python<'_>) -> PyResult<()> {
-    crate::callback::check_close_thread()?;
+    crate::callback::check_blocking_thread()?;
     if runtime().prepare_shutdown() {
         py.detach(|| runtime().join());
     }

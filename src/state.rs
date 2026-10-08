@@ -6,6 +6,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::{PyBytes, PyBytesMethods};
 use pyo3::{Bound, PyResult, Python};
 
+use crate::callback::check_blocking_thread;
 use crate::errors::{ConnectError, SendError};
 
 /// Owns a client except while a connection owns its native resource.
@@ -27,6 +28,7 @@ impl<T> Client<T> {
     }
 
     pub fn with_available<R>(&self, operation: impl FnOnce(&mut T) -> PyResult<R>) -> PyResult<R> {
+        check_blocking_thread()?;
         let mut state = self.try_state()?;
         match &mut *state {
             ClientState::Available(native) => operation(native),
@@ -41,6 +43,7 @@ impl<T> Client<T> {
         connection: &Connection<R>,
         operation: impl FnOnce(T) -> Result<R, midir::ConnectError<T>>,
     ) -> PyResult<()> {
+        check_blocking_thread()?;
         let native = {
             let mut state = self.try_state()?;
             if !matches!(*state, ClientState::Available(_)) {
@@ -107,6 +110,7 @@ impl<T> Connection<T> {
     where
         T: Send,
     {
+        check_blocking_thread()?;
         // PyBytes owns immutable storage for the entire detached call. Extract
         // the slice while attached, then release the GIL before taking the lock.
         let message = message.as_bytes();
