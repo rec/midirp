@@ -1,4 +1,4 @@
-//! Direct-delivery prototype. Not compiled into the Python extension yet.
+//! Direct native-thread delivery with a GC-visible callable and a drain gate.
 
 use std::cell::Cell;
 use std::sync::{Condvar, Mutex};
@@ -6,6 +6,7 @@ use std::sync::{Condvar, Mutex};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use pyo3::{PyTraverseError, PyVisit};
 
 /// Owns the callable and drains all admitted deliveries before native teardown.
 pub struct Callback {
@@ -38,8 +39,7 @@ impl Callback {
             Delivery { callback: self }
         };
 
-        // This is best-effort attachment, not proof of safe interpreter shutdown.
-        // That proof and Python GC integration are the next slice's gate.
+        // The shutdown registry disables and drains this gate before finalization.
         Python::try_attach(|py| {
             let _thread = CallbackThread::enter();
             let callable = {
@@ -62,33 +62,40 @@ impl Callback {
         });
     }
 
-    pub fn close(&self, py: Python<'_>, teardown: impl FnOnce() + Send) -> PyResult<()> {
-        // The thread-wide guard rejects closing any connection from a callback,
-        // including cross-connection close and close from an unraisable hook.
-        if IN_CALLBACK.get() {
-            return Err(PyRuntimeError::new_err(
-                "Cannot close a MIDI connection from a callback; close it from the controlling thread",
-            ));
-        }
-        let retired = py.detach(|| {
+    pub fn traverse(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        let state = self.state.lock().expect("callback state lock poisoned");
+        visit.call(&state.callable)
+    }
+
+    pub fn retire(&self) {
+        let retired = {
             let mut state = self.state.lock().expect("callback state lock poisoned");
             state.accepting = false;
-            while state.active != 0 {
-                state = self
-                    .drained
-                    .wait(state)
-                    .expect("callback state lock poisoned");
-            }
-            let retired = state.callable.take();
-            drop(state);
-            // Never hold the callback lock across native teardown.
-            teardown();
-            retired
-        });
-        // Retire the Python reference while attached, after native teardown.
+            state.callable.take()
+        };
+        // Decref can invoke arbitrary Python destructors. Never do it under a lock.
         drop(retired);
-        Ok(())
     }
+
+    pub fn drain(&self) {
+        let mut state = self.state.lock().expect("callback state lock poisoned");
+        state.accepting = false;
+        while state.active != 0 {
+            state = self
+                .drained
+                .wait(state)
+                .expect("callback state lock poisoned");
+        }
+    }
+}
+
+pub fn check_close_thread() -> PyResult<()> {
+    if IN_CALLBACK.get() {
+        return Err(PyRuntimeError::new_err(
+            "Cannot close a MIDI connection from a callback; close it from the controlling thread",
+        ));
+    }
+    Ok(())
 }
 
 struct DispatchState {
@@ -147,40 +154,53 @@ mod tests {
     use pyo3::types::PyList;
 
     use super::*;
-    use crate::state::{Client, Connection};
+    use crate::lifecycle::{self, Managed, Resource};
+    use crate::state::Client;
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     const DEADLINE: Duration = Duration::from_secs(5);
 
     // Private driver: its worker calls the actual bridge on a native thread.
     // It never initializes or simulates an OS MIDI backend.
-    #[pyclass(frozen)]
+    #[pyclass(frozen, weakref)]
     struct InputDriver {
         callback: Arc<Callback>,
-        connection: Connection<NativeThread>,
-        client: Client<()>,
+        resource: Arc<Managed<(), NativeThread>>,
     }
 
     #[pymethods]
     impl InputDriver {
         fn close(&self, py: Python<'_>) -> PyResult<()> {
-            self.callback.close(py, || {
-                self.connection.close(&self.client, |native| {
-                    native.commands.send(Command::Stop).unwrap();
-                    native.worker.join().unwrap();
-                });
-            })
+            check_close_thread()?;
+            self.resource.retire();
+            py.detach(|| self.resource.close());
+            Ok(())
         }
 
         #[getter]
         fn closed(&self, py: Python<'_>) -> bool {
-            py.detach(|| self.connection.closed())
+            py.detach(|| self.resource.native.closed())
+        }
+
+        fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+            self.callback.traverse(visit)
+        }
+
+        fn __clear__(&self) {
+            lifecycle::defer(self.resource.clone());
+        }
+    }
+
+    impl Drop for InputDriver {
+        fn drop(&mut self) {
+            lifecycle::defer(self.resource.clone());
         }
     }
 
     struct NativeThread {
         commands: mpsc::Sender<Command>,
         worker: thread::JoinHandle<()>,
+        stopped: Option<mpsc::Sender<()>>,
     }
 
     enum Command {
@@ -202,28 +222,39 @@ mod tests {
     fn driver(
         py: Python<'_>,
         callable: &Bound<'_, PyAny>,
+        stopped: Option<mpsc::Sender<()>>,
     ) -> (Py<InputDriver>, mpsc::Sender<Command>) {
+        lifecycle::initialize(py).unwrap();
         let callback = Arc::new(Callback::new(py, callable.clone().unbind()).unwrap());
+        let resource = Arc::new(Managed::new(
+            Arc::new(Client::new(())),
+            Some(Arc::clone(&callback)),
+            |native: NativeThread| {
+                native.commands.send(Command::Stop).unwrap();
+                native.worker.join().unwrap();
+                if let Some(stopped) = native.stopped {
+                    stopped.send(()).unwrap();
+                }
+            },
+        ));
         let driver = Py::new(
             py,
             InputDriver {
                 callback: Arc::clone(&callback),
-                connection: Connection::new(),
-                client: Client::new(()),
+                resource: Arc::clone(&resource),
             },
         )
         .unwrap();
         let (commands, receiver) = mpsc::channel();
-        driver
-            .get()
-            .client
-            .connect(&driver.get().connection, |()| {
+        lifecycle::register(resource.clone()).unwrap();
+        resource
+            .connect(|()| {
                 let worker = thread::spawn(move || {
                     for command in receiver {
                         match command {
                             Command::Emit(timestamp, bytes, done) => {
                                 callback.deliver(timestamp, &bytes);
-                                done.send(()).unwrap();
+                                let _ = done.send(());
                             }
                             Command::Stop => break,
                         }
@@ -232,6 +263,7 @@ mod tests {
                 Ok(NativeThread {
                     commands: commands.clone(),
                     worker,
+                    stopped,
                 })
             })
             .unwrap();
@@ -272,7 +304,7 @@ mod tests {
                 .unwrap()
                 .call_method1("ref", (&recorder,))
                 .unwrap();
-            let (driver, _) = driver(py, &recorder);
+            let (driver, _) = driver(py, &recorder, None);
             drop(recorder);
             assert!(!reference.call0().unwrap().is_none());
             driver.get().close(py).unwrap();
@@ -292,7 +324,7 @@ mod tests {
                 .unwrap()
                 .extract()
                 .unwrap();
-            let (driver, commands) = driver(py, &recorder);
+            let (driver, commands) = driver(py, &recorder, None);
             let first = emit(&commands, 0, vec![0x90, 60, 127]);
             let second = emit(&commands, u64::MAX, vec![0xf0, 0, 1, 0xf7]);
             py.detach(move || {
@@ -332,7 +364,7 @@ mod tests {
             let context = module.call_method0("capture_errors").unwrap();
             let errors = context.call_method0("__enter__").unwrap();
             let recorder = module.getattr("RaisingRecorder").unwrap().call0().unwrap();
-            let (driver, commands) = driver(py, &recorder);
+            let (driver, commands) = driver(py, &recorder, None);
             errors
                 .setattr("targets", vec![driver.clone_ref(py)])
                 .unwrap();
@@ -372,8 +404,8 @@ mod tests {
             let module = fixtures(py);
             let recorder = module.getattr("CloseRecorder").unwrap().call0().unwrap();
             let unrelated_recorder = module.getattr("Recorder").unwrap().call0().unwrap();
-            let (own, commands) = driver(py, &recorder);
-            let (unrelated, _) = driver(py, &unrelated_recorder);
+            let (own, commands) = driver(py, &recorder, None);
+            let (unrelated, _) = driver(py, &unrelated_recorder, None);
             recorder
                 .setattr("targets", vec![own.clone_ref(py), unrelated.clone_ref(py)])
                 .unwrap();
@@ -403,7 +435,7 @@ mod tests {
                 .unwrap()
                 .call0()
                 .unwrap();
-            let (driver, commands) = driver(py, &recorder);
+            let (driver, commands) = driver(py, &recorder, None);
             let delivered = emit(&commands, 1, vec![0xf8]);
             assert!(recorder
                 .getattr("started")
@@ -449,7 +481,141 @@ mod tests {
                 });
             });
             assert!(driver.get().closed(py));
-            assert_eq!(driver.get().client.with_available(|()| Ok(37)).unwrap(), 37);
+            assert_eq!(
+                driver
+                    .get()
+                    .resource
+                    .client
+                    .with_available(|()| Ok(37))
+                    .unwrap(),
+                37
+            );
         });
+    }
+    #[test]
+    fn ordinary_destruction_restores_the_client_without_blocking_python() {
+        let _test = TEST_LOCK.lock().unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let recorder = fixtures(py).getattr("Recorder").unwrap().call0().unwrap();
+            let (stopped, receiver) = mpsc::channel();
+            let (driver, _) = driver(py, &recorder, Some(stopped));
+            let resource = Arc::clone(&driver.get().resource);
+            let client = Arc::clone(&driver.get().resource.client);
+            drop(driver);
+            py.detach(move || {
+                receiver.recv_timeout(DEADLINE).unwrap();
+                // The stop signal precedes client restoration. Taking the
+                // connection lock waits for automatic cleanup to complete.
+                assert!(resource.native.closed());
+            });
+            assert_eq!(client.with_available(|()| Ok(37)).unwrap(), 37);
+        });
+    }
+
+    #[test]
+    fn cyclic_collection_releases_the_connection_and_callable() {
+        let _test = TEST_LOCK.lock().unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let recorder = fixtures(py)
+                .getattr("CloseRecorder")
+                .unwrap()
+                .call0()
+                .unwrap();
+            let (stopped, receiver) = mpsc::channel();
+            let (driver, _) = driver(py, &recorder, Some(stopped));
+            recorder
+                .setattr("targets", vec![driver.clone_ref(py)])
+                .unwrap();
+            let weakref = PyModule::import(py, "weakref").unwrap();
+            let connection_ref = weakref.call_method1("ref", (driver.bind(py),)).unwrap();
+            let callable_ref = weakref.call_method1("ref", (&recorder,)).unwrap();
+            drop(driver);
+            drop(recorder);
+            PyModule::import(py, "gc")
+                .unwrap()
+                .call_method0("collect")
+                .unwrap();
+            assert!(connection_ref.call0().unwrap().is_none());
+            assert!(callable_ref.call0().unwrap().is_none());
+            py.detach(move || receiver.recv_timeout(DEADLINE).unwrap());
+        });
+    }
+
+    #[test]
+    fn last_connection_reference_can_disappear_on_the_callback_thread() {
+        let _test = TEST_LOCK.lock().unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let recorder = fixtures(py)
+                .getattr("DroppingRecorder")
+                .unwrap()
+                .call0()
+                .unwrap();
+            let (stopped, receiver) = mpsc::channel();
+            let (driver, commands) = driver(py, &recorder, Some(stopped));
+            let resource = Arc::clone(&driver.get().resource);
+            let client = Arc::clone(&driver.get().resource.client);
+            recorder
+                .setattr("targets", vec![driver.clone_ref(py)])
+                .unwrap();
+            let reference = PyModule::import(py, "weakref")
+                .unwrap()
+                .call_method1("ref", (driver.bind(py),))
+                .unwrap();
+            drop(driver);
+            let delivered = emit(&commands, 1, vec![0xf8]);
+            py.detach(move || {
+                delivered.recv_timeout(DEADLINE).unwrap();
+                receiver.recv_timeout(DEADLINE).unwrap();
+                assert!(resource.native.closed());
+            });
+            assert!(reference.call0().unwrap().is_none());
+            assert_eq!(client.with_available(|()| Ok(37)).unwrap(), 37);
+        });
+    }
+
+    #[test]
+    #[ignore = "must run alone in a fresh process: finalizes CPython"]
+    fn interpreter_finalization_drains_a_live_input() {
+        let (stopped, receiver) = mpsc::channel();
+        // SAFETY: pytest runs only this test in a fresh native test process.
+        // No Python objects or errors escape this closure or are used afterwards.
+        unsafe {
+            pyo3::with_embedded_python_interpreter(|py| {
+                let module = fixtures(py);
+                let blocked = module.getattr("BlockingRecorder").unwrap().call0().unwrap();
+                let (active, commands) = driver(py, &blocked, Some(stopped.clone()));
+                let _delivered = emit(&commands, 2, vec![0xfe]);
+                assert!(blocked
+                    .getattr("started")
+                    .unwrap()
+                    .call_method1("wait", (5,))
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap());
+                module.setattr("active_connection", active).unwrap();
+                // Registered later, this releases the blocked callback immediately
+                // before our cleanup handler. It still needs the GIL to return.
+                PyModule::import(py, "atexit")
+                    .unwrap()
+                    .call_method1(
+                        "register",
+                        (blocked.getattr("release").unwrap().getattr("set").unwrap(),),
+                    )
+                    .unwrap();
+                let recorder = module.getattr("CloseRecorder").unwrap().call0().unwrap();
+                let (driver, commands) = driver(py, &recorder, Some(stopped));
+                recorder
+                    .setattr("targets", vec![driver.clone_ref(py)])
+                    .unwrap();
+                module.setattr("live_connection", driver).unwrap();
+                // A native delivery may be waiting for the GIL when atexit begins.
+                let _delivered = emit(&commands, 1, vec![0xf8]);
+            });
+        }
+        receiver.recv_timeout(DEADLINE).unwrap();
+        receiver.recv_timeout(DEADLINE).unwrap();
     }
 }

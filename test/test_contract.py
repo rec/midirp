@@ -26,7 +26,13 @@ def test_native_errors_have_a_common_base(error: type[midi.MidiError]) -> None:
 
 
 @pytest.mark.parametrize(
-    "handle", [midi.MidiInputPort, midi.MidiOutputPort, midi.MidiOutputConnection]
+    "handle",
+    [
+        midi.MidiInputPort,
+        midi.MidiOutputPort,
+        midi.MidiInputConnection,
+        midi.MidiOutputConnection,
+    ],
 )
 def test_resource_handles_cannot_be_constructed_directly(handle: type[object]) -> None:
     with pytest.raises(TypeError):

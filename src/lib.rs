@@ -5,14 +5,13 @@ mod input;
 mod output;
 mod state;
 
-// Input delivery remains a test-only prototype until slice 4 proves automatic
-// destruction, cyclic collection, and interpreter shutdown safe.
-#[cfg(test)]
 mod callback;
+mod lifecycle;
 
 /// Python bindings for midir. Importing this module does not open a MIDI client.
 #[pymodule]
 fn midi(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    lifecycle::initialize(module.py())?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     let py = module.py();
     module.add("MidiError", py.get_type::<errors::MidiError>())?;
@@ -22,6 +21,7 @@ fn midi(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SendError", py.get_type::<errors::SendError>())?;
     module.add_class::<input::MidiInput>()?;
     module.add_class::<input::MidiInputPort>()?;
+    module.add_class::<input::MidiInputConnection>()?;
     module.add_class::<output::MidiOutput>()?;
     module.add_class::<output::MidiOutputPort>()?;
     module.add_class::<output::MidiOutputConnection>()?;

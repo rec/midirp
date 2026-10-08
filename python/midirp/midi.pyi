@@ -1,5 +1,6 @@
 """Native midir bindings. Importing this module does not initialize MIDI."""
 
+from collections.abc import Callable
 from types import TracebackType
 
 __version__: str
@@ -26,11 +27,17 @@ class MidiOutputPort:
     """An opaque output-port handle returned by discovery."""
 
 class MidiInput:
-    """An input client. Callback connections are not implemented yet."""
+    """An input client that cannot be used while its connection is open."""
 
     def __init__(self, client_name: str) -> None: ...
     def ports(self) -> list[MidiInputPort]: ...
     def port_name(self, port: MidiInputPort) -> str: ...
+    def connect(
+        self,
+        port: MidiInputPort,
+        port_name: str,
+        callback: Callable[[int, bytes], object],
+    ) -> MidiInputConnection: ...
 
 class MidiOutput:
     """An output client that cannot be used while its connection is open."""
@@ -39,6 +46,20 @@ class MidiOutput:
     def ports(self) -> list[MidiOutputPort]: ...
     def port_name(self, port: MidiOutputPort) -> str: ...
     def connect(self, port: MidiOutputPort, port_name: str) -> MidiOutputConnection: ...
+
+class MidiInputConnection:
+    """An owned connection that restores its original client when closed."""
+
+    @property
+    def closed(self) -> bool: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> MidiInputConnection: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None: ...
 
 class MidiOutputConnection:
     """An owned connection that restores its original client when closed."""

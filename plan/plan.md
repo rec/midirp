@@ -17,48 +17,56 @@ versions and Rust minimum version in the build configuration and lockfiles.
 
 ### Implementation status, 2026-10-08
 
-Slices 1 and 2 are implemented. The build uses midir 0.11.0, PyO3 0.29.3,
+Slices 1 through 4 are implemented. The build uses midir 0.11.0, PyO3 0.29.3,
 maturin 1.15.0, and Rust 1.87. Cargo is the authoritative version source.
 The CPython 3.11 macOS arm64 wheel builds and imports outside the checkout,
 with its stub and typing marker included.
 
 The current API includes input/output constructors, port discovery and names,
-and output connect/close/context management. The shared ownership core tests
+and input/output connect/close/context management. The shared ownership core tests
 failed-connect restoration, client exclusion, reuse, and concurrent teardown
 without MIDI devices. Python tests cover the installed-package contract,
 exception hierarchy, opaque-handle construction, and argument conversion.
 
-Input callbacks, sending, port identifiers/equality, filters, and virtual ports
+Sending, port identifiers/equality, filters, and virtual ports
 remain unimplemented. Native device operation and broader platform/interpreter
-validation remain unverified. The callback and finalization gates still apply to
-slices 3 and 4.
+validation remain unverified. Native backend lifecycle validation remains a later gate.
 
-Slice 3 is complete as an internal, test-only prototype, as agreed before
-implementation. `src/callback.rs` owns one callable, admits and counts deliveries,
-invokes Python without holding resource locks, reports callback exceptions, and
-disables/drains dispatch before native teardown while releasing the GIL. A
-thread-wide guard rejects any connection close invoked from a callback or its
-unraisable-error hook. Explicit close retires the callable after teardown.
+Slice 3 supplied the direct-delivery bridge, now compiled into the extension by
+slice 4. Callbacks receive owned bytes and unchanged timestamps on midir's
+thread, with exceptions reported through `sys.unraisablehook`. Explicit close
+rejects callback-thread callers, releases the GIL, and waits for active delivery
+and native teardown. Both connection directions have context managers.
 
-The private Rust driver feeds borrowed message slices on a native worker and
-uses the existing ownership core for teardown. Its tests cover exact bytes and
-timestamps, order, non-callable rejection, ignored return values, continued
-delivery after exceptions, close rejection, concurrent close with a blocked
-callback, late-delivery suppression, and callable release. Pytest runs the native
-test binary directly with a deadline; it passes only required environment
-variables rather than exposing inherited credentials in failure tracebacks.
+Slice 4 implements the approved architecture revision: one documented native
+cleanup worker for the main interpreter, plus a weak native-resource registry
+and an `atexit` handler. Automatic destruction and cyclic collection disable
+delivery and queue teardown. They do not synchronously restore the client;
+explicit close remains the way to wait for restoration. GC traversal visits the
+single callable reference and each connection's Python client. Native Arc clones do not add
+untracked Python references. No callback dispatcher or buffering API was added.
 
-Neither the prototype nor the driver is compiled into wheels. No public input
-connection API or native device operation is added in this slice. Slice 4 must
-reuse this bridge, not add a parallel delivery path, before exposing input.
+The registry includes pending opens. Per-resource synchronization prevents native
+opening after teardown and lets shutdown wait for an open already in progress.
+Shutdown rejects registration, disables all delivery, drains native resources
+without the GIL, and joins the worker before finalization. Subinterpreters are
+rejected. Standard GIL-enabled CPython remains the supported interpreter model.
 
-Source review of midir 0.11.0 reinforces the remaining lifecycle gate: ALSA
-input teardown joins its handler thread, CoreMIDI close locks handler data, and
-WinMM performs native reset/stop/close under a handle lock. The driver tests
-validate the binding's explicit-close protocol, not those platform implementations.
-`Python::try_attach` is best-effort and does not prove shutdown safe. Automatic
-destruction on a callback thread and untracked Python reference cycles remain
-unresolved slice 4 work; do not use the prototype in the published input API yet.
+The private native-thread driver uses the production callback and managed-resource
+paths. Tests cover exact bytes/timestamps/order, ignored results, exception
+reporting, callable release, forbidden callback-thread close, concurrent close,
+ordinary destruction, cyclic collection, the last reference disappearing inside
+a callback, and real CPython finalization with a live input. Isolated subprocess
+checks also cover shutdown idempotence and rejection of new registrations. The
+pytest runner bounds each native process and passes only required environment
+variables. The driver is not included in the Python extension.
+
+Source review of midir 0.11.0 found why callback-thread destruction needed the
+worker: ALSA joins its handler thread, CoreMIDI close locks handler data, and
+WinMM resets/stops/closes under a native handle lock. Unit tests validate the
+binding lifecycle protocol, not those platform implementations. No MIDI clients
+or devices have been opened during verification; native backend testing remains
+required before claiming runtime support.
 
 ## Additional work beyond the prompt
 
@@ -268,8 +276,10 @@ shutdown with a live input. A callback-thread guard on explicit `close()` alone
 does not solve native destruction on that thread. Finalization must stop dispatch
 before Python teardown and must not attach to a finalized interpreter.
 
-Do not paper over a failed lifecycle proof with leaks, daemon threads, retries,
-or a hidden global service. If direct callback delivery cannot meet these
+The approved slice 4 revision permits the documented cleanup worker and weak
+shutdown registry described above. It preserves direct callback delivery. Do not
+paper over a failed lifecycle proof with leaks, daemon threads, retries, or an
+additional hidden global service. If direct callback delivery cannot meet these
 requirements with the selected backends, stop implementation and present the
 concrete failure and a revised ownership/delivery design for approval. A queued
 input design changes the public contract and is not an automatic fallback.

@@ -1,12 +1,17 @@
-use pyo3::prelude::*;
+use std::sync::Arc;
 
+use pyo3::prelude::*;
+use pyo3::{PyTraverseError, PyVisit};
+
+use crate::callback::check_close_thread;
 use crate::errors::{InitError, PortInfoError};
-use crate::state::{Client, Connection};
+use crate::lifecycle::{self, Managed, Resource};
+use crate::state::Client;
 
 /// A MIDI output client that is unavailable while its connection is open.
 #[pyclass(frozen, module = "midirp.midi")]
 pub struct MidiOutput {
-    state: Client<midir::MidiOutput>,
+    state: Arc<Client<midir::MidiOutput>>,
 }
 
 /// An opaque output-port handle obtained from discovery.
@@ -24,7 +29,7 @@ impl MidiOutputPort {
 /// Owns a native output connection and keeps its original Python client alive.
 #[pyclass(frozen, module = "midirp.midi")]
 pub struct MidiOutputConnection {
-    native: Connection<midir::MidiOutputConnection>,
+    resource: Arc<Managed<midir::MidiOutput, midir::MidiOutputConnection>>,
     client: Py<MidiOutput>,
 }
 
@@ -36,7 +41,7 @@ impl MidiOutput {
             .detach(|| midir::MidiOutput::new(client_name))
             .map_err(|error| InitError::new_err(format!("create output: {error}")))?;
         Ok(Self {
-            state: Client::new(native),
+            state: Arc::new(Client::new(native)),
         })
     }
 
@@ -72,14 +77,20 @@ impl MidiOutput {
         let connection = Py::new(
             py,
             MidiOutputConnection {
-                native: Connection::new(),
+                resource: Arc::new(Managed::new(
+                    Arc::clone(&slf.get().state),
+                    None,
+                    midir::MidiOutputConnection::close,
+                )),
                 client: slf.clone_ref(py),
             },
         )?;
+        lifecycle::register(connection.get().resource.clone())?;
         py.detach(|| {
-            slf.get().state.connect(&connection.get().native, |native| {
-                native.connect(&port.native, port_name)
-            })
+            connection
+                .get()
+                .resource
+                .connect(|native| native.connect(&port.native, port_name))
         })?;
         Ok(connection)
     }
@@ -88,20 +99,19 @@ impl MidiOutput {
 #[pymethods]
 impl MidiOutputConnection {
     /// Close once and restore the original client. Waits for concurrent close.
-    fn close(&self, py: Python<'_>) {
-        py.detach(|| {
-            self.native
-                .close(&self.client.get().state, midir::MidiOutputConnection::close)
-        });
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        check_close_thread()?;
+        py.detach(|| self.resource.close());
+        Ok(())
     }
 
     #[getter]
     fn closed(&self, py: Python<'_>) -> bool {
-        py.detach(|| self.native.closed())
+        py.detach(|| self.resource.native.closed())
     }
 
     fn __enter__(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<Self>> {
-        if py.detach(|| slf.get().native.closed()) {
+        if py.detach(|| slf.get().resource.native.closed()) {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "MIDI connection is closed",
             ));
@@ -115,16 +125,21 @@ impl MidiOutputConnection {
         _exc_type: &Bound<'_, PyAny>,
         _exc_value: &Bound<'_, PyAny>,
         _traceback: &Bound<'_, PyAny>,
-    ) {
-        self.close(py);
+    ) -> PyResult<()> {
+        self.close(py)
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.client)
+    }
+
+    fn __clear__(&self) {
+        lifecycle::defer(self.resource.clone());
     }
 }
 
 impl Drop for MidiOutputConnection {
     fn drop(&mut self) {
-        // There are no Python input callbacks yet. Native output teardown does
-        // not attach to Python and restores the client on ordinary destruction.
-        self.native
-            .close(&self.client.get().state, midir::MidiOutputConnection::close);
+        lifecycle::defer(self.resource.clone());
     }
 }

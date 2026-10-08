@@ -33,7 +33,7 @@ No MIDI clients or devices are opened by the unit tests.
 
 ## Current implementation
 
-The first two slices provide the build and ownership foundation:
+The first four slices provide the build, ownership, and callback lifecycle:
 
 - Input and output clients can enumerate ports and retrieve their names.
 - An output client can connect to a discovered output port. The connection owns
@@ -42,11 +42,11 @@ The first two slices provide the build and ownership foundation:
   with `RuntimeError`. Failed connection attempts restore the same native client.
 - `close()` restores the original client for reuse and is idempotent. Concurrent
   close calls wait for teardown to finish. Output connections support context
-  managers; ordinary destruction also closes them.
+  managers. Input connections have the same close and context-manager contract.
 - Native failures use `MidiError` subclasses: `InitError`, `PortInfoError`,
   `ConnectError`, and `SendError`. Invalid Python argument types raise `TypeError`.
 
-Output sending, input callbacks, identifiers, filters, and virtual ports are
+Output sending, identifiers, filters, and virtual ports are
 scheduled for later slices. `SendError` is defined for the planned send API;
 there is no send method yet. Port and connection handles cannot be constructed
 directly. Context-manager exit closes the connection and propagates body errors.
@@ -56,15 +56,30 @@ connection, and destruction against actual OS backends have not been exercised.
 The build and installed wheel have been verified on macOS arm64 with CPython
 3.11. Broader interpreter and platform validation remains later work.
 
-Slice 3 adds an internal direct-callback prototype, compiled only by Rust's test
-harness. Its private native-thread driver verifies owned bytes, unchanged
-timestamps, message order, ignored return values, and error reporting through
-`sys.unraisablehook`. It also verifies rejection of self/cross-connection close
-from callbacks and error hooks, concurrent close while a callback is blocked,
-callable release, and suppression of delivery after close. The pytest runner
-executes the native test binary with a timeout to detect GIL deadlocks.
+Input clients now support `connect(port, port_name, callback)`. The callback
+receives `(timestamp: int, message: bytes)` directly on the native MIDI callback
+thread. Bytes are copied, timestamps are unchanged, and return values are ignored.
+Exceptions go to `sys.unraisablehook` with the callable as context; subsequent
+messages still arrive. Keep callbacks short; Python scheduling does not provide
+hard real-time guarantees. Calling any connection's `close()` from a MIDI
+callback or its error hook raises `RuntimeError`; signal the controlling thread
+to close it instead.
 
-Neither the prototype nor its driver is exposed in the Python extension.
-`MidiInput.connect()` remains unavailable until slice 4 resolves and verifies
-automatic destruction, cyclic garbage collection, and interpreter shutdown.
-The prototype is not evidence of native backend shutdown safety.
+Each main interpreter has one documented native cleanup worker, created when the
+extension is imported, and a registry of weak native-resource references. The
+worker does not deliver callbacks. Ordinary destruction and cyclic collection
+disable delivery immediately and queue teardown without blocking Python or
+joining the callback's own thread. Client reuse after automatic destruction must
+wait for cleanup to finish; use explicit `close()` for synchronous restoration.
+The connection's single callable reference is visible to Python's collector;
+native closures do not duplicate that Python ownership.
+
+An `atexit` handler stops registration, disables all input delivery, drains active
+callbacks and connections with the GIL released, and joins the cleanup worker
+before interpreter finalization. Subinterpreters are explicitly rejected.
+Normal interpreter exit is covered; process termination that bypasses `atexit`
+does not run Python cleanup. The native-thread unit driver exercises this same
+bridge and resource lifecycle without opening MIDI devices. Tests include
+callback-thread destruction, cycles, concurrent close, pending opens, and actual
+CPython finalization in separate processes with deadlines. These tests do not
+establish platform backend or physical-device shutdown safety.

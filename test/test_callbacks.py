@@ -18,17 +18,21 @@ def test_native_callback_lifecycle_completes_without_deadlock() -> None:
         ["cargo", "test", "--lib", "--no-run", "--message-format=json"],
         cwd=project,
         env=environment,
-        check=True,
+        check=False,
         stdout=subprocess.PIPE,
         text=True,
         timeout=60,
     )
+    messages = [json.loads(x) for x in build.stdout.splitlines()]
+    assert build.returncode == 0, "\n".join(
+        x["message"]["rendered"] for x in messages if x["reason"] == "compiler-message"
+    )
     artifacts = [
-        j["executable"]
-        for x in build.stdout.splitlines()
-        if (j := json.loads(x))["reason"] == "compiler-artifact"
-        and j["profile"]["test"]
-        and j["executable"] is not None
+        x["executable"]
+        for x in messages
+        if x["reason"] == "compiler-artifact"
+        and x["profile"]["test"]
+        and x["executable"] is not None
     ]
     (executable,) = artifacts
     subprocess.run(
@@ -38,3 +42,15 @@ def test_native_callback_lifecycle_completes_without_deadlock() -> None:
         check=True,
         timeout=15,
     )
+
+    for t in (
+        "callback::tests::interpreter_finalization_drains_a_live_input",
+        "lifecycle::tests::shutdown_rejects_new_registrations_and_is_idempotent",
+    ):
+        subprocess.run(
+            [executable, t, "--exact", "--ignored", "--test-threads=1"],
+            cwd=project,
+            env=environment,
+            check=True,
+            timeout=15,
+        )

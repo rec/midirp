@@ -52,6 +52,12 @@ class CloseRecorder(Recorder):
                 self.errors.append(str(e))
 
 
+class DroppingRecorder(CloseRecorder):
+    def __call__(self, timestamp: int, message: bytes) -> None:
+        Recorder.__call__(self, timestamp, message)
+        self.targets.clear()
+
+
 class BlockingRecorder(Recorder):
     def __init__(self) -> None:
         super().__init__()
