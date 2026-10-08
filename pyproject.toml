@@ -9,6 +9,21 @@ description = "Python bindings for the midir Rust MIDI library"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/rec/midirp"
+Issues = "https://github.com/rec/midirp/issues"
 
 [dependency-groups]
 dev = [
@@ -22,6 +37,7 @@ dev = [
 [tool.maturin]
 python-source = "python"
 module-name = "midirp.midi"
+locked = true
 
 [tool.uv]
 cache-keys = [
