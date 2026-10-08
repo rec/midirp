@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 mod errors;
+mod ignore;
 mod input;
 mod output;
 mod state;
@@ -19,6 +20,7 @@ fn midi(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("PortInfoError", py.get_type::<errors::PortInfoError>())?;
     module.add("ConnectError", py.get_type::<errors::ConnectError>())?;
     module.add("SendError", py.get_type::<errors::SendError>())?;
+    module.add_class::<ignore::Ignore>()?;
     module.add_class::<input::MidiInput>()?;
     module.add_class::<input::MidiInputPort>()?;
     module.add_class::<input::MidiInputConnection>()?;

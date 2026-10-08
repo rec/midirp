@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
+#[cfg(unix)]
+use midir::os::unix::VirtualInput;
 use pyo3::prelude::*;
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::callback::{check_close_thread, Callback};
 use crate::errors::{InitError, PortInfoError};
+use crate::ignore::Ignore;
 use crate::lifecycle::{self, Managed, Resource};
 use crate::state::Client;
 
@@ -83,6 +86,15 @@ impl MidiInput {
         })
     }
 
+    fn ignore(&self, py: Python<'_>, flags: &Ignore) -> PyResult<()> {
+        py.detach(|| {
+            self.state.with_available(|native| {
+                native.ignore(flags.native);
+                Ok(())
+            })
+        })
+    }
+
     fn connect(
         slf: Py<Self>,
         py: Python<'_>,
@@ -90,31 +102,40 @@ impl MidiInput {
         port_name: &str,
         callback: Py<PyAny>,
     ) -> PyResult<Py<MidiInputConnection>> {
-        let callback = Arc::new(Callback::new(py, callback)?);
-        let resource = Arc::new(Managed::new(
-            Arc::clone(&slf.get().state),
-            Some(Arc::clone(&callback)),
-            |native: midir::MidiInputConnection<()>| native.close().0,
-        ));
-        let connection = Py::new(
-            py,
-            MidiInputConnection {
-                resource: Arc::clone(&resource),
-                client: slf,
-            },
-        )?;
-        lifecycle::register(resource.clone())?;
-        py.detach(|| {
-            resource.connect(|native| {
-                native.connect(
-                    &port.native,
+        MidiInputConnection::open(py, slf, callback, |native, callback| {
+            native.connect(
+                &port.native,
+                port_name,
+                move |timestamp, bytes, ()| callback.deliver(timestamp, bytes),
+                (),
+            )
+        })
+    }
+
+    /// Receive messages that other applications send to this virtual input.
+    fn create_virtual(
+        slf: Py<Self>,
+        py: Python<'_>,
+        port_name: &str,
+        callback: Py<PyAny>,
+    ) -> PyResult<Py<MidiInputConnection>> {
+        #[cfg(unix)]
+        {
+            MidiInputConnection::open(py, slf, callback, |native, callback| {
+                native.create_virtual(
                     port_name,
                     move |timestamp, bytes, ()| callback.deliver(timestamp, bytes),
                     (),
                 )
             })
-        })?;
-        Ok(connection)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (slf, py, port_name, callback);
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "Virtual MIDI input ports are not supported on this platform",
+            ))
+        }
     }
 }
 
@@ -169,6 +190,37 @@ impl MidiInputConnection {
 
     fn __clear__(&self) {
         lifecycle::defer(self.resource.clone());
+    }
+}
+
+impl MidiInputConnection {
+    fn open(
+        py: Python<'_>,
+        client: Py<MidiInput>,
+        callable: Py<PyAny>,
+        operation: impl FnOnce(
+                midir::MidiInput,
+                Arc<Callback>,
+            )
+                -> Result<midir::MidiInputConnection<()>, midir::ConnectError<midir::MidiInput>>
+            + Send,
+    ) -> PyResult<Py<Self>> {
+        let callback = Arc::new(Callback::new(py, callable)?);
+        let resource = Arc::new(Managed::new(
+            Arc::clone(&client.get().state),
+            Some(Arc::clone(&callback)),
+            |native: midir::MidiInputConnection<()>| native.close().0,
+        ));
+        let connection = Py::new(
+            py,
+            Self {
+                resource: Arc::clone(&resource),
+                client,
+            },
+        )?;
+        lifecycle::register(resource.clone())?;
+        py.detach(|| resource.connect(|native| operation(native, callback)))?;
+        Ok(connection)
     }
 }
 

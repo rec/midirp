@@ -17,19 +17,21 @@ versions and Rust minimum version in the build configuration and lockfiles.
 
 ### Implementation status, 2026-10-08
 
-Slices 1 through 5 are implemented. The build uses midir 0.11.0, PyO3 0.29.3,
+Slices 1 through 6 are implemented. The build uses midir 0.11.0, PyO3 0.29.3,
 maturin 1.15.0, and Rust 1.87. Cargo is the authoritative version source.
 The CPython 3.11 macOS arm64 wheel builds and imports outside the checkout,
 with its stub and typing marker included.
 
 The current API includes input/output constructors, port discovery and names,
 input/output connect/close/context management, port IDs/equality/lookup,
-and output sending. The shared ownership core tests failed-connect restoration, client exclusion, reuse, and concurrent teardown
+output sending, input filtering, and virtual input/output creation. The shared
+ownership core tests failed-connect restoration, client exclusion, reuse, and
+concurrent teardown
 without MIDI devices. Python tests cover the installed-package contract,
 exception hierarchy, opaque-handle construction, and argument conversion.
 
-Filters and virtual ports remain unimplemented. Native device operation and
-broader platform/interpreter validation remain unverified. Native backend
+The planned binding API is implemented. Native device operation and broader
+platform/interpreter validation remain unverified. Native backend
 lifecycle validation remains a later gate.
 
 Slice 3 supplied the direct-delivery bridge, now compiled into the extension by
@@ -86,6 +88,26 @@ error mapping, recovery after failed send, close during a send, and sending from
 an input callback through a separate output. The pytest deadline now covers all
 native unit tests as well as the isolated finalization checks. No device was
 opened; upstream port identity/lookup and real sending await slice 7 validation.
+
+Slice 6 exposes the immutable native `Ignore` value: `NONE`, `SYSEX`, `TIME`,
+`ACTIVE_SENSE`, and `ALL`, with bitwise OR and equality. `Ignore(bits)` constructs
+any of the eight upstream masks and rejects unknown bits with `ValueError`;
+non-integer masks raise `TypeError`. `int(flags)` returns the upstream bits.
+`MidiInput.ignore(flags)` requires an `Ignore` value and mutates only an available
+native client under the existing state lock, with the GIL released. Native default
+filtering remains `None`; configuration survives failed opens and close.
+
+Unix virtual creation uses midir's `VirtualInput` and `VirtualOutput` traits.
+Normal and virtual methods share one open path per direction for allocation,
+callback validation, weak registry registration, native ownership transfer, and
+cleanup. Windows methods raise `NotImplementedError` before taking native state.
+Virtual input receives from other applications; virtual output sends to them.
+
+Unit tests cover the eight masks, OR combinations without mutation, invalid bits
+(including oversized integers), wrong mask/OR types, and configuration preservation
+and state exclusion. No native virtual ports or devices were created. Actual
+filtering, Unix loopback traffic, reopen, shutdown under traffic, and Windows
+unsupported-path runtime checks remain explicitly authorized slice 7 validation.
 
 ## Additional work beyond the prompt
 

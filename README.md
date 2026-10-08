@@ -33,7 +33,7 @@ No MIDI clients or devices are opened by the unit tests.
 
 ## Current implementation
 
-The first five slices provide discovery, sending, ownership, and callback lifecycle:
+The first six slices provide the planned MIDI API and callback lifecycle:
 
 - Input and output clients can enumerate ports, retrieve their names, and find
   ports with `find_port_by_id(id)`, returning `None` when absent.
@@ -60,13 +60,29 @@ Concurrent sends and close share the native resource lock with the GIL released;
 close waits for an already-running send. An input callback may send through a
 separate output connection.
 
-Filters and virtual ports remain for slice 6. Port and connection handles cannot
-be constructed directly. Context-manager exit closes the connection and
-propagates body errors.
+Input clients provide `ignore(flags: Ignore)`. The default is `Ignore.NONE`.
+Combine `Ignore.SYSEX`, `Ignore.TIME`, and `Ignore.ACTIVE_SENSE` with `|`;
+`Ignore.ALL` combines those three filters, so other MIDI messages still arrive.
+`Ignore(bits)` accepts integer masks from 0 through 7; unknown bits raise
+`ValueError`, and `int(flags)` returns the mask. Set filters before connecting;
+changing them while the client is unavailable raises `RuntimeError`. Filter
+configuration survives failed connection attempts and close.
+
+On macOS and Linux, `MidiInput.create_virtual(port_name, callback)` creates an
+input that receives messages sent by other applications. Likewise,
+`MidiOutput.create_virtual(port_name)` creates an output that sends messages to
+applications connected to it. Both return the usual owned connection with the
+same close, context-manager, GC, and shutdown behavior. A failed creation restores
+the original client and raises `ConnectError`. On Windows both methods raise
+`NotImplementedError` before changing native client state. Virtual input validates
+its callable before consuming native ownership on supported platforms.
+
+Port and connection handles cannot be constructed directly. Context-manager exit
+closes the connection and propagates body errors.
 
 Ownership transitions are tested without MIDI devices. Native discovery,
-lookup, sending, connection, and destruction against actual OS backends have not
-been exercised.
+lookup, sending, filtering, virtual creation, connection, and destruction against
+actual OS backends have not been exercised.
 The build and installed wheel have been verified on macOS arm64 with CPython
 3.11. Broader interpreter and platform validation remains later work.
 
@@ -104,3 +120,9 @@ send/close concurrency, and sending from a native input callback. The private
 output driver records calls through the production byte boundary and ownership
 core; it does not create or simulate an OS MIDI backend. Port identity and lookup
 use midir directly and await native-backend validation.
+
+Slice 6 checks cover all eight filter masks, combinations, unknown-bit and wrong-
+type rejection, and preservation of configured filters through the ownership
+transitions. Normal and virtual connections share their allocation, registration,
+and native-open path. Virtual loopback and Windows unsupported-path runtime checks
+remain part of slice 7; successful compilation is not native MIDI validation.

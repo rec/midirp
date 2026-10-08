@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from types import TracebackType
+from typing import ClassVar
 
 __version__: str
 
@@ -19,6 +20,22 @@ class ConnectError(MidiError):
 
 class SendError(MidiError):
     """A MIDI message could not be sent."""
+
+class Ignore:
+    """Immutable upstream input-filter bits. ALL combines three filters."""
+
+    NONE: ClassVar[Ignore]
+    SYSEX: ClassVar[Ignore]
+    TIME: ClassVar[Ignore]
+    ACTIVE_SENSE: ClassVar[Ignore]
+    ALL: ClassVar[Ignore]
+
+    def __init__(self, bits: int) -> None: ...
+    def __or__(self, other: Ignore) -> Ignore: ...
+    def __int__(self) -> int: ...
+    def __repr__(self) -> str: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class MidiInputPort:
     """An opaque, unhashable input-port handle returned by discovery."""
@@ -41,11 +58,15 @@ class MidiInput:
     def ports(self) -> list[MidiInputPort]: ...
     def port_name(self, port: MidiInputPort) -> str: ...
     def find_port_by_id(self, id: str) -> MidiInputPort | None: ...
+    def ignore(self, flags: Ignore) -> None: ...
     def connect(
         self,
         port: MidiInputPort,
         port_name: str,
         callback: Callable[[int, bytes], object],
+    ) -> MidiInputConnection: ...
+    def create_virtual(
+        self, port_name: str, callback: Callable[[int, bytes], object]
     ) -> MidiInputConnection: ...
 
 class MidiOutput:
@@ -56,6 +77,7 @@ class MidiOutput:
     def port_name(self, port: MidiOutputPort) -> str: ...
     def find_port_by_id(self, id: str) -> MidiOutputPort | None: ...
     def connect(self, port: MidiOutputPort, port_name: str) -> MidiOutputConnection: ...
+    def create_virtual(self, port_name: str) -> MidiOutputConnection: ...
 
 class MidiInputConnection:
     """An owned connection that restores its original client when closed."""

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+#[cfg(unix)]
+use midir::os::unix::VirtualOutput;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::{PyTraverseError, PyVisit};
@@ -97,26 +99,26 @@ impl MidiOutput {
         port: &MidiOutputPort,
         port_name: &str,
     ) -> PyResult<Py<MidiOutputConnection>> {
-        // Allocate first: a Python allocation failure must not consume the client.
-        let connection = Py::new(
-            py,
-            MidiOutputConnection {
-                resource: Arc::new(Managed::new(
-                    Arc::clone(&slf.get().state),
-                    None,
-                    midir::MidiOutputConnection::close,
-                )),
-                client: slf.clone_ref(py),
-            },
-        )?;
-        lifecycle::register(connection.get().resource.clone())?;
-        py.detach(|| {
-            connection
-                .get()
-                .resource
-                .connect(|native| native.connect(&port.native, port_name))
-        })?;
-        Ok(connection)
+        MidiOutputConnection::open(py, slf, |native| native.connect(&port.native, port_name))
+    }
+
+    /// Send messages to applications connected to this virtual output.
+    fn create_virtual(
+        slf: Py<Self>,
+        py: Python<'_>,
+        port_name: &str,
+    ) -> PyResult<Py<MidiOutputConnection>> {
+        #[cfg(unix)]
+        {
+            MidiOutputConnection::open(py, slf, |native| native.create_virtual(port_name))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (slf, py, port_name);
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "Virtual MIDI output ports are not supported on this platform",
+            ))
+        }
     }
 }
 
@@ -166,6 +168,34 @@ impl MidiOutputConnection {
 
     fn __clear__(&self) {
         lifecycle::defer(self.resource.clone());
+    }
+}
+
+impl MidiOutputConnection {
+    fn open(
+        py: Python<'_>,
+        client: Py<MidiOutput>,
+        operation: impl FnOnce(
+                midir::MidiOutput,
+            )
+                -> Result<midir::MidiOutputConnection, midir::ConnectError<midir::MidiOutput>>
+            + Send,
+    ) -> PyResult<Py<Self>> {
+        // Allocate first: a Python allocation failure must not consume the client.
+        let connection = Py::new(
+            py,
+            Self {
+                resource: Arc::new(Managed::new(
+                    Arc::clone(&client.get().state),
+                    None,
+                    midir::MidiOutputConnection::close,
+                )),
+                client,
+            },
+        )?;
+        lifecycle::register(connection.get().resource.clone())?;
+        py.detach(|| connection.get().resource.connect(operation))?;
+        Ok(connection)
     }
 }
 

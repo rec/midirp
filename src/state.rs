@@ -24,9 +24,9 @@ impl<T> Client<T> {
         }
     }
 
-    pub fn with_available<R>(&self, operation: impl FnOnce(&T) -> PyResult<R>) -> PyResult<R> {
-        let state = self.state.lock().expect("client state lock poisoned");
-        match &*state {
+    pub fn with_available<R>(&self, operation: impl FnOnce(&mut T) -> PyResult<R>) -> PyResult<R> {
+        let mut state = self.state.lock().expect("client state lock poisoned");
+        match &mut *state {
             ClientState::Available(native) => operation(native),
             _ => Err(PyRuntimeError::new_err(
                 "MIDI client is unavailable while connecting, connected, or closing",
@@ -227,6 +227,55 @@ mod tests {
 
         assert!(connection.closed());
         assert_eq!(client.with_available(|native| Ok(*native)).unwrap(), 37);
+    }
+
+    #[test]
+    fn input_filter_configuration_survives_failed_connect_and_close() {
+        let client = Client::new(midir::Ignore::None);
+        let connection = Connection::new();
+        assert_eq!(
+            client.with_available(|native| Ok(*native)).unwrap(),
+            midir::Ignore::None
+        );
+        let flags = midir::Ignore::Sysex | midir::Ignore::Time;
+        client
+            .with_available(|native| {
+                *native = flags;
+                Ok(())
+            })
+            .unwrap();
+        let error = client
+            .connect(&connection, |native| {
+                assert!(client
+                    .with_available(|native| {
+                        *native = midir::Ignore::All;
+                        Ok(())
+                    })
+                    .is_err());
+                Err(midir::ConnectError::other(
+                    "virtual creation failed",
+                    native,
+                ))
+            })
+            .unwrap_err();
+        Python::initialize();
+        Python::attach(|py| {
+            assert!(error.is_instance_of::<ConnectError>(py));
+            assert_eq!(
+                error.value(py).to_string(),
+                "connect: virtual creation failed"
+            );
+        });
+        assert_eq!(client.with_available(|native| Ok(*native)).unwrap(), flags);
+        client.connect(&connection, Ok).unwrap();
+        assert!(client
+            .with_available(|native| {
+                *native = midir::Ignore::None;
+                Ok(())
+            })
+            .is_err());
+        connection.close(&client, |native| native);
+        assert_eq!(client.with_available(|native| Ok(*native)).unwrap(), flags);
     }
 
     #[test]
