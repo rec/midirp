@@ -44,7 +44,6 @@ references and function names refer to that pinned source, not a newer release.
 
 | ID | Severity | Evidence | Concern |
 | --- | --- | --- | --- |
-| L2 | High | Confirmed design; possible stall | One cleanup worker makes a stuck close delay every queued automatic close. |
 | L3 | High | Possible | Application wait cycles and callback output reentrancy can deadlock despite the close guard. |
 | L4 | High | Confirmed in source | Panic paths bypass ownership restoration and can poison locks or terminate cleanup. |
 | B1 | High | Confirmed in source | ALSA input thread-start failure returns a client with its sequencer missing. |
@@ -63,29 +62,6 @@ Agreed approach: retain the in-process binding and reduce avoidable waits.
 Guaranteed native-operation or shutdown deadlines would require process
 isolation and remain outside this implementation. L issues are handled
 sequentially, with focused device-free checks and separate commits.
-
-### L2. Cleanup has a global bottleneck and unbounded backlog
-
-**Confirmed in source.** `lifecycle::initialize()` starts one process-wide
-cleanup thread using an unbounded `mpsc::channel`. Connection destruction and
-GC retire callbacks and enqueue strong references to managed native resources.
-The worker closes resources serially.
-
-If one native close or callback drain stalls, subsequent automatic closes do
-not run. Their clients, native resources, and associated storage remain alive.
-Continuing to create and discard connections grows the backlog without a
-binding-imposed limit. Shutdown also closes resources serially and joins the
-worker; one stalled resource can prevent interpreter exit.
-
-The weak registry avoids retaining every Python connection indefinitely, but
-scans existing entries on every registration. Many simultaneously live
-connections can produce quadratic total registration work. Dead weak entries
-are pruned on the next registration or shutdown, not immediately on close.
-
-**Proposed investigation:** one deliberately blocked teardown followed by many
-dropped resources; measure retained resources and registry/queue growth. Any
-change to cleanup concurrency or backlog policy requires an explicit design
-decision, including how to preserve safe native ownership.
 
 ### L3. The callback-thread close guard cannot prevent all deadlocks
 
@@ -166,6 +142,9 @@ application waits or faulty drivers.
 ### L6. Interpreter shutdown and process lifecycle have additional constraints
 
 **API limitation and possible hangs.** Cleanup runs through Python `atexit`.
+The bounded four-worker pool cannot progress if all workers are stuck in native
+teardown or callback draining. Native calls have no safe general cancellation
+mechanism; bounded shutdown still requires process isolation.
 Handler ordering matters: a callback waiting for an event set by a later-running
 exit handler can stop MIDI shutdown from completing. A callback running a C
 extension that blocks while retaining the GIL can prevent Python shutdown from
@@ -411,10 +390,10 @@ though the context manager closes correctly.
 | --- | --- | --- |
 | Python/native heap | Owned input `bytes`, native message vectors, outgoing SysEx copies/buffers, port lists | Large messages and retained messages consume memory; allocator failures are not uniformly translated to Python exceptions. |
 | SysEx assembly storage | CoreMIDI/ALSA append until completion | Missing `F7` plus continuing packets can grow buffers without a size/deadline cap; no callback is delivered for the unfinished message. |
-| Application buffering | README examples use unbounded `Queue()` | A producer faster than its consumer grows memory outside the binding. A bounded blocking queue has the L3 tradeoff. |
-| Cleanup queue | Strong references while awaiting the single worker | Backlog retains native resources and clients, including after Python connection destruction. |
+| Application buffering | README examples use unbounded `Queue()` | A producer faster than its consumer grows memory outside the binding. A bounded blocking queue can deadlock callback draining if its consumer stops. |
+| Cleanup queue | Up to 32 reserved resources and four workers | Stalled jobs retain their native resources and clients; all four stalled workers prevent further progress. |
 | CPU/GIL | Per-message Python attachment, copies, callback calls, error hooks | Floods, slow callbacks, or repeated exceptions consume CPU and delay unrelated Python work; no backpressure, batch API, or real-time deadline. |
-| Threads/stack | One global cleanup worker; ALSA input reader per input connection; OS-managed backend callback work | OS thread quotas or memory limits can stop import/open. ALSA failure restoration is specifically broken as described in B1. |
+| Threads/stack | Four global cleanup workers; ALSA input reader per input connection; OS-managed backend callback work | OS thread quotas or memory limits can stop import/open. ALSA failure restoration is specifically broken as described in B1. |
 | File descriptors/handles | ALSA sequencer and stop-pipe descriptors; WinMM handles; native endpoints and queues | OS/user quotas can reject setup or trigger upstream panic/rollback defects. |
 | Native clients/ports | CoreMIDI retained clients, ALSA queues/ports, virtual endpoints | Churn can consume native quotas and generate topology work in other applications. |
 | Disk | Installation/build artifacts and caches; no recording or MIDI data files in normal binding operation | Full disk mainly affects installation/builds or application/error-hook logging, rather than the MIDI byte path. |

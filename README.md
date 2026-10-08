@@ -172,15 +172,23 @@ native call or stop arbitrary callback code. A timeout around a calling thread
 does not cancel its operation. Applications requiring guaranteed recovery from
 these failures need a separate process boundary.
 
-Import starts one native cleanup worker for the main interpreter, without
-initializing a MIDI backend. The worker only tears down resources; callbacks
-remain on midir's thread. Destruction and cyclic GC disable delivery immediately
+Import starts four native cleanup workers for the main interpreter, without
+initializing a MIDI backend. They only tear down resources; callbacks
+remain on midir's thread. At most 32 connections may be opening, live, or
+awaiting cleanup. An open beyond this capacity raises `RuntimeError` before
+consuming its client. Explicitly closed connections release capacity; a queued
+job keeps its reservation until a worker consumes it. Each resource is queued
+at most once, so cleanup storage and registry scans remain bounded. A stalled
+worker leaves the others available, but four stalled workers can still prevent
+cleanup and shutdown.
+
+Destruction and cyclic GC disable delivery immediately
 and queue teardown without blocking Python. Client restoration is asynchronous
 in that case; use explicit close when reuse must be immediate. Callback references
 are visible to Python's collector.
 
 An `atexit` handler rejects new registrations, disables delivery, drains active
-callbacks and live resources with the GIL released, and joins the cleanup worker
+callbacks and live resources with the GIL released, and joins the cleanup workers
 before finalization. A callback that never returns can prevent clean shutdown.
 Forced termination bypassing `atexit` does not run Python cleanup.
 Subinterpreters are rejected. Starting a fresh interpreter is required for a
