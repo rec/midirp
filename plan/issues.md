@@ -46,7 +46,6 @@ references and function names refer to that pinned source, not a newer release.
 
 | ID | Severity | Evidence | Concern |
 | --- | --- | --- | --- |
-| B1 | High | Confirmed in source | ALSA input thread-start failure returns a client with its sequencer missing. |
 | B2 | Medium | Confirmed in source | Failed ALSA opens can leave queues or ports allocated on the restored client. |
 | B3 | High | Confirmed cleanup gaps; possible unsafe callback | WinMM partial input-open failures lack complete native rollback. |
 | B4 | High | Possible | WinMM reset/requeue lock interaction and failed buffer unpreparation need native fault checks. |
@@ -102,25 +101,6 @@ PyO3's module/GIL behavior, not an assumption that every unsupported build
 either safely works or cleanly fails.
 
 ## Backend-specific exceptional paths
-
-### B1. ALSA thread creation failure breaks the restored client
-
-**High; confirmed in source, not fault-injected.** In both input `connect()` and
-`create_virtual()`, [midir's ALSA backend](https://github.com/Boddlnagg/midir/blob/v0.11.0/src/backend/alsa/mod.rs)
-moves `self.seq` into `HandlerData` before spawning the reader thread. On spawn
-failure it returns `ConnectError` containing `self`, whose `seq` is now `None`.
-In-process mode restores that object as `Available`. Later discovery or
-connect operations unwrap the missing sequencer and panic upstream. The binding
-now catches that panic and disables the client, but the returned failed-open
-client is still unusable.
-
-Default isolated mode discards the worker immediately on its returned native
-error, containing subsequent use and reclaiming its resources at process exit.
-The defective native rollback remains in `isolated=False`. Thread exhaustion is
-a concrete trigger. Mocked returned-error checks do not exercise that ALSA path.
-
-**Proposed next work:** fault-inject thread-start failure and pursue upstream
-rollback. Do not silently retry the returned client on this failure.
 
 ### B2. ALSA failed opens can retain native allocations
 
@@ -342,7 +322,7 @@ though the context manager closes correctly.
 | Application buffering | README examples use unbounded `Queue()` | A producer faster than its consumer grows memory outside the binding. A bounded blocking queue can deadlock callback draining if its consumer stops. |
 | In-process cleanup queue | Up to 32 reserved resources and four workers | Stalled jobs retain their native resources and clients; all four stalled workers prevent further progress. |
 | CPU/GIL | Per-message Python attachment, copies, callback calls, error hooks | Floods, slow callbacks, or repeated exceptions consume CPU and delay unrelated Python work; no backpressure, batch API, or real-time deadline. |
-| Threads/stack | Four cleanup workers per interpreter; two communication threads per isolated client, a parent dispatch thread and child forwarding thread per isolated input; ALSA input reader per input connection; OS-managed backend callback work | OS thread quotas or memory limits can stop import/open. ALSA failure restoration is specifically broken as described in B1. |
+| Threads/stack | Four cleanup workers per interpreter; two communication threads per isolated client, a parent dispatch thread and child forwarding thread per isolated input; ALSA input reader per input connection; OS-managed backend callback work | OS thread quotas or memory limits can stop import/open. |
 | Child processes | One interpreter per isolated client, no global client quota | Startup memory, process quotas, and scheduling overhead can limit client count. |
 | File descriptors/handles | Two stdio pipes per worker; ALSA sequencer and stop-pipe descriptors; WinMM handles; native endpoints and queues | OS/user quotas can reject setup or trigger upstream panic/rollback defects. |
 | Native clients/ports | CoreMIDI retained clients, ALSA queues/ports, virtual endpoints | Churn can consume native quotas and generate topology work in other applications. |
@@ -444,11 +424,9 @@ fail during interpreter shutdown through `try_attach`, skipping Python delivery.
 
 ### A4. Documentation and supported-platform boundaries
 
-**Validation gaps.** Default native failures invalidate the worker. In-process
-failed-open rollback still has the B1 caveat. Caught panics permanently disable
-affected native ownership. Native exception detail remains a human-readable
-string rather than a structured error kind. Cross-platform SysEx framing
-remains a validation gap.
+**Validation gaps.** Native exception detail remains a human-readable string
+rather than a structured error kind. Cross-platform SysEx framing remains a
+validation gap.
 The stub describes handles as unhashable but does not explicitly declare a
 `__hash__ = None` surface; static-tool behavior should be checked before calling
 this a type-checker defect.
@@ -468,7 +446,7 @@ These are recommendations for future authorized work, not changes made by this
 document. Native fault checks need explicit runtime authorization and selected
 software endpoints or hardware; ordinary CI should not probe arbitrary devices.
 
-1. Address the source-established ALSA unusable-client path and WinMM partial
+1. Address ALSA failed-open allocation rollback and WinMM partial
    initialization/teardown risks first. Decide whether to contribute upstream
    changes or adopt an already verified upstream fix before changing pins.
 2. Investigate allocator aborts, native busy loops, backend failed rollback, and

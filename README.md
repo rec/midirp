@@ -208,6 +208,9 @@ Concurrent discovery, metadata, or configuration on the same client raises
 `RuntimeError` immediately if another client operation is in progress.
 Isolated failed native opens invalidate the client. In-process ordinary failed
 opens restore the same native client, subject to upstream rollback defects.
+ALSA input handler thread-start failure permanently disables its client even
+in-process: the opening call raises `ConnectError`; subsequent client operations
+raise `RuntimeError` requiring a new client.
 Successful `close()` is synchronous and idempotent, restores the client for
 reuse, and waits for concurrent teardown.
 `closed` is a nonblocking ownership-state snapshot. It remains false during

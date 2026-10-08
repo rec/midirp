@@ -20,7 +20,7 @@ pub fn native_call<T>(operation: &str, call: impl FnOnce() -> T) -> PyResult<T> 
 }
 
 pub fn failed_error() -> pyo3::PyErr {
-    PyRuntimeError::new_err("MIDI resource failed after a native panic; create a new client")
+    PyRuntimeError::new_err("MIDI resource failed; create a new client")
 }
 
 /// Diagnostics must not turn cleanup failures into another unwind.

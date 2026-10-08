@@ -80,7 +80,16 @@ impl<T> Client<T> {
             }
             Ok(Err(error)) => {
                 let message = format!("connect: {error}");
-                *self.lock_state()? = ClientState::Available(error.into_inner());
+                let mut state = self.lock_state()?;
+                // midir 0.11.0 returns an ALSA input client without its
+                // sequencer on this error, from both connect and virtual open.
+                if matches!(
+                    error.kind(),
+                    midir::ConnectErrorKind::Other("could not start ALSA input handler thread")
+                ) {
+                    self.failed.store(true, Ordering::Release);
+                }
+                *state = ClientState::Available(error.into_inner());
                 Err(ConnectError::new_err(message))
             }
             Err(error) => {
@@ -336,6 +345,65 @@ mod tests {
             assert!(connection
                 .close(&client, |_| panic!("native teardown must not repeat"))
                 .is_err());
+        });
+    }
+
+    #[test]
+    fn alsa_thread_start_failure_disables_client_before_any_native_reuse() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Client::new(Some(Box::new(37)));
+            let connection: Connection<Option<Box<i32>>> = Connection::new();
+            let error = client
+                .connect(&connection, |mut native| {
+                    // ALSA moves the sequencer into the spawn closure. Failed
+                    // spawn drops that closure and returns a client with None.
+                    drop(native.take().unwrap());
+                    Err(midir::ConnectError::other(
+                        "could not start ALSA input handler thread",
+                        native,
+                    ))
+                })
+                .unwrap_err();
+            assert!(error.is_instance_of::<ConnectError>(py));
+            assert_eq!(
+                error.value(py).to_string(),
+                "connect: could not start ALSA input handler thread"
+            );
+            assert!(connection.closed());
+
+            let mut reused = false;
+            let result = client.with_available(|_| {
+                reused = true;
+                Ok(())
+            });
+            assert!(!reused, "damaged client reached a native operation");
+            let error = result.unwrap_err();
+            assert!(error.is_instance_of::<PyRuntimeError>(py));
+            assert_eq!(
+                error.value(py).to_string(),
+                "MIDI resource failed; create a new client"
+            );
+            let result = client.connect(&Connection::new(), |native| {
+                reused = true;
+                Ok(native)
+            });
+            assert!(!reused, "damaged client reached native opening");
+            assert!(result.unwrap_err().is_instance_of::<PyRuntimeError>(py));
+            connection
+                .close(&client, |_| panic!("failed open has no native connection"))
+                .unwrap();
+
+            let fresh = Client::new(Some(Box::new(19)));
+            let reopened = Connection::new();
+            fresh.connect(&reopened, Ok).unwrap();
+            reopened.close(&fresh, |native| native).unwrap();
+            assert_eq!(
+                fresh
+                    .with_available(|native| Ok(**native.as_ref().unwrap()))
+                    .unwrap(),
+                19
+            );
         });
     }
 

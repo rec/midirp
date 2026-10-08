@@ -68,6 +68,27 @@ Native Rust checks pass 36 ordinary tests plus three isolated finalization cases
 run by the Python lifecycle harness. Parent callbacks still have no cancellation
 deadline. Native ALSA/WinMM I/O and physical unplug/reboot checks remain unrun.
 
+## ALSA failed-open containment (B1), 2026-10-08
+
+Pinned midir 0.11.0 returns `ConnectErrorKind::Other("could not start ALSA input
+handler thread")` from both input opening paths after moving the sequencer into
+the spawn closure. The binding now marks that client failed before publishing
+its returned state. Opening preserves `ConnectError`; subsequent discovery,
+configuration, and opening fail with `RuntimeError` requiring a fresh client.
+Ordinary returned errors preserve their existing restoration behavior.
+
+A device-free Rust regression injects the same error and a returned client with
+its sequencer removed. It failed before the fix because native reuse was
+attempted, and passes after the fix. It checks metadata/configuration gating,
+reopening rejection, cleanup with no live handle, and independent fresh-client
+reuse. This verifies binding containment, not real ALSA thread exhaustion or
+upstream resource rollback; native Linux fault injection remains unrun. No
+native MIDI ports, dependency changes, or upstream modifications were needed.
+All 59 Python checks pass, including the Rust lifecycle harness with 37 ordinary
+Rust cases and three isolated finalization cases. Ruff, formatting, ty,
+pyupgrade, Cargo formatting, and Clippy with warnings denied pass. CI is now
+release-only, so this push does not schedule a new cross-platform run.
+
 ## CI and artifacts
 
 The [CI workflow](../.github/workflows/ci.yml) has 16 combinations: CPython
