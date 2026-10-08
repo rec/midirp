@@ -103,7 +103,8 @@ The available GitHub credentials permit status inspection but deny log and
 artifact downloads. The initial failure output came from the owner; subsequent
 failures were readable through CI annotations. Distribution inspection in the
 matrix runs on the runners. Local artifact inspection is recorded below.
-Validation-record-only pushes do not rebuild artifacts.
+CI now runs only on published GitHub releases. Pushes and pull requests do not
+trigger the workflow.
 
 The local CPython 3.11 wheel built from the sdist, passed both archive checks,
 and passed all 33 installed-package checks in a fresh environment outside the
@@ -144,8 +145,8 @@ explicitly chosen physical port or installed loopback driver.
 | ALSA | Not run; requires a host with sequencer access |
 | WinMM | Not run; requires a selected device/driver for I/O |
 
-The CI `workflow_dispatch` input `coremidi` opts into macOS arm64 virtual tests.
-Default push and PR checks do not initialize a MIDI client. These checks do not
+Native checks are selected locally with explicit authorization. Release CI
+does not initialize an OS MIDI client. These checks do not
 cover unplug/replug, driver failure, hardware timing, or a universal throughput
 bound. The local 1,000-message CC burst measured about 165,567 messages/s;
 send-to-callback median 0.174 ms, p99 0.692 ms, and maximum 0.753 ms. This is one

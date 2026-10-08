@@ -319,8 +319,8 @@ uv run pytest test/manual/loopback.py -v
 uv run pytest test/manual/windows.py -v
 ```
 
-Run these only with permission on the target host. CI's manual `coremidi` option
-enables the virtual-port checks on macOS arm64. Linux needs a sequencer device;
+Run these only with permission on the target host. CI runs only when a GitHub
+release is published and excludes native device checks. Linux needs a sequencer device;
 Windows I/O needs an explicitly chosen external port. See the
 [implementation plan](plan/plan.md), [validation record](plan/validation.md), and
 [third-party notices](THIRD_PARTY_NOTICES.md). midirp is licensed under
