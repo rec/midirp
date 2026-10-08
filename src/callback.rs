@@ -11,6 +11,47 @@ use pyo3::{PyTraverseError, PyVisit};
 
 use crate::errors::failed_error;
 
+/// Reuses the native callback contract on a parent-process dispatch thread.
+#[pyclass(frozen, module = "midirp._native")]
+pub struct CallbackBridge {
+    callback: Callback,
+}
+
+#[pymethods]
+impl CallbackBridge {
+    #[new]
+    fn new(py: Python<'_>, callable: Py<PyAny>) -> PyResult<Self> {
+        Ok(Self {
+            callback: Callback::new(py, callable)?,
+        })
+    }
+
+    fn deliver(&self, timestamp: u64, message: &Bound<'_, PyBytes>) {
+        self.callback.deliver(timestamp, message.as_bytes());
+    }
+
+    fn retire(&self) {
+        self.callback.retire();
+    }
+
+    fn drain(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.callback.drain())
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.callback.traverse(visit)
+    }
+
+    fn __clear__(&self) {
+        self.callback.retire();
+    }
+}
+
+#[pyfunction]
+pub fn check_thread() -> PyResult<()> {
+    check_blocking_thread()
+}
+
 /// Owns the callable and drains all admitted deliveries before native teardown.
 pub struct Callback {
     state: Mutex<DispatchState>,

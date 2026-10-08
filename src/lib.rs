@@ -27,5 +27,27 @@ fn midi(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<output::MidiOutput>()?;
     module.add_class::<output::MidiOutputPort>()?;
     module.add_class::<output::MidiOutputConnection>()?;
+    let native = PyModule::new(py, "midirp._native")?;
+    for name in [
+        "MidiError",
+        "InitError",
+        "PortInfoError",
+        "ConnectError",
+        "SendError",
+        "Ignore",
+        "MidiInput",
+        "MidiInputPort",
+        "MidiInputConnection",
+        "MidiOutput",
+        "MidiOutputPort",
+        "MidiOutputConnection",
+    ] {
+        native.add(name, module.getattr(name)?)?;
+    }
+    native.add_class::<callback::CallbackBridge>()?;
+    native.add_function(wrap_pyfunction!(callback::check_thread, &native)?)?;
+    PyModule::import(py, "sys")?
+        .getattr("modules")?
+        .set_item("midirp._native", native)?;
     Ok(())
 }
