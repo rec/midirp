@@ -55,3 +55,16 @@ Ownership transitions are tested without MIDI devices. Native discovery,
 connection, and destruction against actual OS backends have not been exercised.
 The build and installed wheel have been verified on macOS arm64 with CPython
 3.11. Broader interpreter and platform validation remains later work.
+
+Slice 3 adds an internal direct-callback prototype, compiled only by Rust's test
+harness. Its private native-thread driver verifies owned bytes, unchanged
+timestamps, message order, ignored return values, and error reporting through
+`sys.unraisablehook`. It also verifies rejection of self/cross-connection close
+from callbacks and error hooks, concurrent close while a callback is blocked,
+callable release, and suppression of delivery after close. The pytest runner
+executes the native test binary with a timeout to detect GIL deadlocks.
+
+Neither the prototype nor its driver is exposed in the Python extension.
+`MidiInput.connect()` remains unavailable until slice 4 resolves and verifies
+automatic destruction, cyclic garbage collection, and interpreter shutdown.
+The prototype is not evidence of native backend shutdown safety.

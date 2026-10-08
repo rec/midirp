@@ -33,6 +33,33 @@ remain unimplemented. Native device operation and broader platform/interpreter
 validation remain unverified. The callback and finalization gates still apply to
 slices 3 and 4.
 
+Slice 3 is complete as an internal, test-only prototype, as agreed before
+implementation. `src/callback.rs` owns one callable, admits and counts deliveries,
+invokes Python without holding resource locks, reports callback exceptions, and
+disables/drains dispatch before native teardown while releasing the GIL. A
+thread-wide guard rejects any connection close invoked from a callback or its
+unraisable-error hook. Explicit close retires the callable after teardown.
+
+The private Rust driver feeds borrowed message slices on a native worker and
+uses the existing ownership core for teardown. Its tests cover exact bytes and
+timestamps, order, non-callable rejection, ignored return values, continued
+delivery after exceptions, close rejection, concurrent close with a blocked
+callback, late-delivery suppression, and callable release. Pytest runs the native
+test binary directly with a deadline; it passes only required environment
+variables rather than exposing inherited credentials in failure tracebacks.
+
+Neither the prototype nor the driver is compiled into wheels. No public input
+connection API or native device operation is added in this slice. Slice 4 must
+reuse this bridge, not add a parallel delivery path, before exposing input.
+
+Source review of midir 0.11.0 reinforces the remaining lifecycle gate: ALSA
+input teardown joins its handler thread, CoreMIDI close locks handler data, and
+WinMM performs native reset/stop/close under a handle lock. The driver tests
+validate the binding's explicit-close protocol, not those platform implementations.
+`Python::try_attach` is best-effort and does not prove shutdown safe. Automatic
+destruction on a callback thread and untracked Python reference cycles remain
+unresolved slice 4 work; do not use the prototype in the published input API yet.
+
 ## Additional work beyond the prompt
 
 None.

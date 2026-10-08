@@ -5,6 +5,11 @@ mod input;
 mod output;
 mod state;
 
+// Input delivery remains a test-only prototype until slice 4 proves automatic
+// destruction, cyclic collection, and interpreter shutdown safe.
+#[cfg(test)]
+mod callback;
+
 /// Python bindings for midir. Importing this module does not open a MIDI client.
 #[pymodule]
 fn midi(module: &Bound<'_, PyModule>) -> PyResult<()> {
