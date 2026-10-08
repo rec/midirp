@@ -203,5 +203,6 @@ Run these only with permission on the target host. CI's manual `coremidi` option
 enables the virtual-port checks on macOS arm64. Linux needs a sequencer device;
 Windows I/O needs an explicitly chosen external port. See the
 [implementation plan](plan/plan.md), [validation record](plan/validation.md), and
-[third-party notices](THIRD_PARTY_NOTICES.md). Publication requires a separate
-decision after license and native validation gates are resolved.
+[third-party notices](THIRD_PARTY_NOTICES.md). midirp is licensed under
+[MIT](LICENSE). Publication requires a separate decision after the remaining
+native and artifact validation gates are resolved.

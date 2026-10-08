@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    paths-ignore: ['plan/**']
   pull_request:
+    paths-ignore: ['plan/**']
   workflow_dispatch:
     inputs:
       coremidi:

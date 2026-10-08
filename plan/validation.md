@@ -28,9 +28,9 @@ to confirm completed automatic cleanup before asserting client reuse. Production
 behavior did not change.
 
 Ruff, formatting, ty, pyupgrade, Cargo formatting, Clippy with warnings denied,
-and the scoped diff check pass. Native MIDI client constructors, discovery,
-connections, virtual endpoints, and hardware traffic have not been run locally.
-The CoreMIDI loopback request awaits explicit owner authorization.
+and the scoped diff check pass. After explicit owner authorization, all 25
+CoreMIDI virtual-port checks passed on this host with CPython 3.11.7. No hardware
+ports were connected.
 
 ## CI and artifacts
 
@@ -47,6 +47,33 @@ describe replacement of the bundled shared library. macOS wheels use separate
 architectures and system CoreMIDI frameworks. Windows wheels use WinMM.
 Actual tags, native dependency inspection, and CI results must be recorded
 before advertising the resulting artifacts as verified.
+
+[Run 37787345883](https://github.com/rec/midirp/actions/runs/37787345883) passed all
+16 jobs for code commit `1291242`. Each combination passed Rust checks, 34
+Python unit checks including isolated finalization, two archive checks, and
+33 installed-wheel contract checks outside the checkout. All 16 artifact
+downloads were uploaded successfully. Linux archive checks confirm bundled
+libasound and an accompanying source RPM. macOS jobs request deployment target
+11.0; the local binary inspection below verifies that target on arm64.
+
+The Windows runner initially selected Git's `link.exe` instead of the Microsoft
+linker because its environment was too restricted. It now preserves the normal
+compiler environment and overrides only the chosen Python executable and Cargo
+cache in a scoped context. Subprocess env arguments stay implicit, avoiding
+traceback dumps of inherited values. CI sets UV_PYTHON explicitly to prevent
+the checkout's default 3.11 setting from changing interpreters mid-job.
+
+The available GitHub credentials permit status inspection but deny log and
+artifact downloads. The initial failure output came from the owner; subsequent
+failures were readable through CI annotations. Distribution inspection in the
+matrix runs on the runners. Local artifact inspection is recorded below.
+Validation-record-only pushes do not rebuild artifacts.
+
+The local CPython 3.11 wheel built from the sdist, passed both archive checks,
+and passed all 33 installed-package checks in a fresh environment outside the
+checkout. Its tag is `cp311-cp311-macosx_11_0_arm64`. Mach-O inspection confirms
+minimum macOS 11.0 and links system CoreMIDI/CoreAudio/Foundation frameworks,
+without a libpython dependency. CI requests the same macOS deployment baseline.
 
 Opt-in archive checks:
 
@@ -67,6 +94,8 @@ directions, all eight filter masks and the default, exact note/CC/realtime/SysEx
 bytes, timestamp type and monotonic ordering, duplicate names and distinct IDs,
 missing/stale lookup, client reuse, context exceptions, and interpreter exit
 with queued traffic. The shutdown case runs in a subprocess with a deadline.
+Additional cases preserve 128-, 1,024-, and 16,384-byte SysEx messages after
+close and check an ordered burst of 1,000 CC messages.
 
 `test/manual/windows.py` checks unsupported virtual creation and preserved client
 state without connecting hardware. It still initializes the native backend and
@@ -75,15 +104,17 @@ explicitly chosen physical port or installed loopback driver.
 
 | Backend | Recorded native I/O result |
 | --- | --- |
-| CoreMIDI | Pending explicit authorization for this Mac |
+| CoreMIDI | 25 software-loopback checks passed; macOS 14.5 arm64, CPython 3.11.7 |
 | ALSA | Not run; requires a host with sequencer access |
 | WinMM | Not run; requires a selected device/driver for I/O |
 
 The CI `workflow_dispatch` input `coremidi` opts into macOS arm64 virtual tests.
 Default push and PR checks do not initialize a MIDI client. These checks do not
 cover unplug/replug, driver failure, hardware timing, or a universal throughput
-bound. Representative throughput/latency and larger SysEx measurements remain
-native validation work; do not infer them from unit tests.
+bound. The local 1,000-message CC burst measured about 165,567 messages/s;
+send-to-callback median 0.174 ms, p99 0.692 ms, and maximum 0.753 ms. This is one
+software-loopback sample under the host's current load, including GIL scheduling.
+It is not a hardware latency measurement, timing guarantee, or loss threshold.
 
 ## Upstream close/drop review
 
@@ -110,7 +141,7 @@ callback constraints. Source review does not prove driver shutdown safety.
   close, GC, and finalization have device-free coverage.
 - Package name `midirp`: PyPI JSON endpoint returned HTTP 404 on 2026-10-08.
   This is a point-in-time check, not a reservation or guarantee of availability.
-- Project license: owner choice pending. Third-party licenses do not license
-  this project's code. Do not publish until the choice and metadata are resolved.
+- Project license: MIT, explicitly chosen by the owner. LICENSE and the
+  third-party notices are included in source and wheel distributions.
 - Cross-platform artifact validation and native I/O results remain separate gates.
 - No publication credentials, publish workflow, release, or tag were added.

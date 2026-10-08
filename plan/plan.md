@@ -6,10 +6,10 @@ Build a small, typed Python binding for the Rust `midir` library. Python callers
 should be able to discover MIDI ports, receive timestamped raw MIDI messages,
 send raw MIDI messages, and manage connections explicitly.
 
-The repository currently contains only `README.md`. There is no existing API,
-build system, implementation, or test suite to preserve. This document is a
-proposal for future implementation, not a claim that any functionality exists.
-Writing this plan does not authorize running MIDI devices or publishing packages.
+At the planning baseline, the repository contained only `README.md`, with no
+API, build system, implementation, or test suite to preserve. This document
+records the design and completion gates; the current status follows below.
+Writing the plan itself did not authorize MIDI operation or package publication.
 
 Research baseline: 2026-10-05, upstream midir tag `v0.11.0`. Check released PyO3
 and maturin compatibility when implementation starts, then record the chosen
@@ -17,7 +17,13 @@ versions and Rust minimum version in the build configuration and lockfiles.
 
 ### Implementation status, 2026-10-08
 
-Slices 1 through 6 are implemented. The build uses midir 0.11.0, PyO3 0.29.3,
+Slices 1 through 6 are implemented. Slices 7 and 8 now have CI, opt-in native
+fixtures, source/wheel checks, metadata, third-party notices, and usage docs.
+CoreMIDI software-loopback checks passed, the owner selected MIT, and all 16
+cross-platform CI combinations passed. Native ALSA/WinMM I/O evidence remains
+an explicit release gate; hardware behavior has not been validated.
+See [validation.md](validation.md) for current evidence and remaining gates.
+The build uses midir 0.11.0, PyO3 0.29.3,
 maturin 1.15.0, and Rust 1.87. Cargo is the authoritative version source.
 The CPython 3.11 macOS arm64 wheel builds and imports outside the checkout,
 with its stub and typing marker included.
@@ -30,9 +36,9 @@ concurrent teardown
 without MIDI devices. Python tests cover the installed-package contract,
 exception hierarchy, opaque-handle construction, and argument conversion.
 
-The planned binding API is implemented. Native device operation and broader
-platform/interpreter validation remain unverified. Native backend
-lifecycle validation remains a later gate.
+The planned binding API is implemented. CPython 3.11–3.14 pass local unit checks;
+CoreMIDI virtual I/O and shutdown pass on macOS arm64. Hardware operation and
+native ALSA/WinMM lifecycle validation remain separate unverified gates.
 
 Slice 3 supplied the direct-delivery bridge, now compiled into the extension by
 slice 4. Callbacks receive owned bytes and unchanged timestamps on midir's
@@ -517,16 +523,16 @@ build modes clearly rather than silently publishing unvalidated artifacts.
 
 ## Release acceptance checklist
 
-- [ ] Public API and typing match the proposal or documented approved revisions.
-- [ ] Native ownership is restored after close and failed connect.
-- [ ] Received bytes remain valid after callbacks return; timestamps are preserved.
-- [ ] Callback exceptions are visible and cannot unwind into the backend.
-- [ ] Explicit close, concurrent close, GC, and interpreter shutdown pass lifecycle tests.
-- [ ] No native callback starts after completed close.
+- [x] Public API and typing match the proposal or documented approved revisions.
+- [x] Native ownership is restored after close and failed connect.
+- [x] Received bytes remain valid after callbacks return; timestamps are preserved.
+- [x] Callback exceptions are visible and cannot unwind into the backend.
+- [x] Explicit close, concurrent close, GC, and interpreter shutdown pass lifecycle tests.
+- [x] No Python delivery starts after completed close (native-thread driver).
 - [ ] Each advertised backend has recorded native runtime validation.
-- [ ] Wheel and sdist installs include typing and require no Rust compiler for wheel users.
-- [ ] Linux native dependency handling and macOS deployment targets are verified.
-- [ ] No duplicate delivery API, unsolicited dependencies, or hidden worker service.
-- [ ] Documentation states GIL, timing, device-disconnection, and platform limits.
-- [ ] Repository checks pass and changes are committed and pushed in coherent units.
+- [x] Local wheel and sdist checks include typing; wheel installs need no Rust compiler.
+- [x] Linux wheel dependencies and the local macOS deployment target are verified.
+- [x] No duplicate delivery API, unsolicited dependencies, or hidden worker service.
+- [x] Documentation states GIL, timing, device-disconnection, and platform limits.
+- [x] Repository checks pass and changes are committed and pushed in coherent units.
 - [ ] Package name, project license, and publication authorization are resolved before release.

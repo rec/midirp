@@ -2,8 +2,14 @@
 
 Pinned Rust dependency license texts for the supported build targets follow.
 Dual-licensed dependencies are used under their MIT option where available.
-Build-only dependencies are included for completeness. These notices do not
-choose a license for midirp itself.
+Build-only dependencies are included for completeness. midirp's own MIT license
+is in LICENSE.
+
+block2, objc2, and objc2-encode omit license files from their crate archives.
+Their shared MIT text is retained from the upstream objc2 repository's
+LICENSE-MIT.txt at revision e45c53301628aec4ead5c086dde282942ca972db,
+retrieved on 2026-10-08:
+https://github.com/madsmtm/objc2/blob/e45c53301628aec4ead5c086dde282942ca972db/LICENSE-MIT.txt
 
 
 ## alsa-0.11.0
