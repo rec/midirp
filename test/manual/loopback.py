@@ -2,15 +2,29 @@
 
 import subprocess
 import sys
+from collections.abc import Iterator
 from contextlib import ExitStack
+from functools import partial
+from os import environ
 from pathlib import Path
 from queue import Queue
 from statistics import median
 from time import perf_counter_ns
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
 from midirp import midi
+from midirp._clients import MidiInput, MidiOutput
+
+
+@pytest.fixture(params=[True, False], autouse=True)
+def isolation(request: pytest.FixtureRequest) -> Iterator[bool]:
+    with (
+        patch.object(midi, "MidiInput", partial(MidiInput, isolated=request.param)),
+        patch.object(midi, "MidiOutput", partial(MidiOutput, isolated=request.param)),
+    ):
+        yield request.param
 
 
 class Collector:
@@ -88,10 +102,12 @@ def test_close_restores_clients_for_reopen_and_propagates_context_errors() -> No
     source = midi.MidiInput("midirp reopen input")
     target = midi.MidiOutput("midirp reopen output")
     source.ignore(midi.Ignore.TIME | midi.Ignore.ACTIVE_SENSE)
-    for _ in range(2):
-        token = f"midirp-reopen-{uuid4().hex}"
-        receiver = Collector()
-        with source.create_virtual(token, receiver) as incoming:
+    token = f"midirp-reopen-{uuid4().hex}"
+    receiver = Collector()
+    # Keep the endpoint alive while checking healthy output-client reuse.
+    # Replacing it is a topology change that can itself cause a native error.
+    with source.create_virtual(token, receiver) as incoming:
+        for _ in range(2):
             (port,) = (p for p in target.ports() if token in target.port_name(p))
             assert target.find_port_by_id(port.id()) == port
             with pytest.raises(TypeError):
@@ -107,12 +123,41 @@ def test_close_restores_clients_for_reopen_and_propagates_context_errors() -> No
             assert outgoing.closed
             with pytest.raises(RuntimeError):
                 outgoing.send(b"\xf8")
-        incoming.close()
-        assert incoming.closed
-        assert target.find_port_by_id(port.id()) is None
+    incoming.close()
+    assert incoming.closed
+    assert target.find_port_by_id(port.id()) is None
 
 
-def test_native_interpreter_exit_drains_live_connections_and_queued_traffic() -> None:
+def test_disappeared_virtual_endpoint_requires_a_fresh_isolated_discovery_client(
+    isolation: bool,
+) -> None:
+    require_unix()
+    source = midi.MidiInput("midirp disappearance input")
+    target = midi.MidiOutput("midirp disappearance output")
+    receiver = Collector()
+    token = f"midirp-disappearance-{uuid4().hex}"
+    with source.create_virtual(token, receiver):
+        (port,) = (p for p in target.ports() if token in target.port_name(p))
+    with pytest.raises(midi.PortInfoError):
+        target.port_name(port)
+    if isolation:
+        with pytest.raises(RuntimeError, match="new client"):
+            target.ports()
+    else:
+        assert isinstance(target.ports(), list)
+    # Reopening is deliberate, never an automatic retry of an uncertain send.
+    token = f"midirp-reappeared-{uuid4().hex}"
+    with source.create_virtual(token, receiver):
+        fresh = midi.MidiOutput("midirp fresh disappearance output")
+        (port,) = (p for p in fresh.ports() if token in fresh.port_name(p))
+        with fresh.connect(port, token) as outgoing:
+            outgoing.send(b"\x90\x3c\x7f")
+            assert receiver.messages.get(timeout=5)[1] == b"\x90\x3c\x7f"
+
+
+def test_native_interpreter_exit_drains_live_connections_and_queued_traffic(
+    isolation: bool,
+) -> None:
     require_unix()
     result = subprocess.run(
         [sys.executable, str(Path(__file__).with_name("shutdown.py"))],
@@ -120,6 +165,7 @@ def test_native_interpreter_exit_drains_live_connections_and_queued_traffic() ->
         capture_output=True,
         text=True,
         timeout=20,
+        env={**environ, "MIDIRP_TEST_ISOLATED": "1" if isolation else "0"},
     )
     assert result.stderr == ""
 

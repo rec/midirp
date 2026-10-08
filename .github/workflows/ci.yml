@@ -104,7 +104,7 @@ jobs:
           fi
           uv pip install --python "$wheel_python" dist/*.whl pytest
           cd "$RUNNER_TEMP"
-          "$wheel_python" -m pytest "$GITHUB_WORKSPACE/test/test_contract.py" "$GITHUB_WORKSPACE/test/test_ignore.py"
+          "$wheel_python" -m pytest "$GITHUB_WORKSPACE/test/test_contract.py" "$GITHUB_WORKSPACE/test/test_ignore.py" "$GITHUB_WORKSPACE/test/test_isolation.py"
       - run: uv run --frozen pytest test/release/artifacts.py -v
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

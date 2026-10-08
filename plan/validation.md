@@ -32,6 +32,42 @@ and the scoped diff check pass. After explicit owner authorization, all 25
 CoreMIDI virtual-port checks passed on this host with CPython 3.11.7. No hardware
 ports were connected.
 
+## Default process isolation, 2026-10-08
+
+The public constructors now default to one fresh child per client with a
+five-second configurable native-operation deadline. `isolated=False` retains the
+original native path. Controlled subprocess checks exercise hung initialization,
+send/close, child crash, native returned errors, fresh-client recovery, stale
+connection generations, local callbacks/error hooks, two-stage overflow counts,
+GC/destruction, callback draining, and interpreter-exit termination/reaping.
+No OS MIDI ports are opened by these unit fixtures. The full local Python suite
+passes 59 cases; Ruff, formatting, ty, pyupgrade, Cargo formatting, and Clippy
+with warnings denied pass. Partial communication-thread startup failure also
+terminates and reaps the already-created child. The rebuilt CPython 3.11 arm64
+wheel from the sdist passes both archive checks and 58 installed-package checks
+outside the checkout, including controlled worker faults and lifecycle checks.
+CI now exercises those isolation checks against installed wheels on every
+matrix combination. [Run 37824404624](https://github.com/rec/midirp/actions/runs/37824404624)
+passed all 16 jobs for implementation commit `5b5fc29`: Python 3.11–3.14 on
+Linux x86_64, Windows x86_64, and macOS arm64/Intel. Each job passed Rust checks,
+59 Python checks, two archive checks, and 58 installed-wheel checks outside the
+checkout. This establishes portable worker logic/builds, not ALSA/WinMM native I/O
+or physical hotplug behavior.
+
+All 52 authorized CoreMIDI software-only cases passed in both modes on CPython
+3.11.7. This includes endpoint disappearance and deliberate fresh-client
+rediscovery, healthy close/reopen against an endpoint kept alive, exact bytes,
+filters, SysEx, bursts, duplicate identities, and shutdown. No hardware was used.
+Earlier isolated topology-churn runs produced stale ID `"0"` metadata failures
+and occasional native initialization failures/timeouts. Failed clients were
+contained, but their backend cause is not established. Graceful healthy-worker
+disposal precedes forced termination; the final passing run does not prove
+shared-service, hardware hotplug, or exhaustion safety.
+
+Native Rust checks pass 36 ordinary tests plus three isolated finalization cases
+run by the Python lifecycle harness. Parent callbacks still have no cancellation
+deadline. Native ALSA/WinMM I/O and physical unplug/reboot checks remain unrun.
+
 ## CI and artifacts
 
 The [CI workflow](../.github/workflows/ci.yml) has 16 combinations: CPython

@@ -49,5 +49,18 @@ fn midi(module: &Bound<'_, PyModule>) -> PyResult<()> {
     PyModule::import(py, "sys")?
         .getattr("modules")?
         .set_item("midirp._native", native)?;
+    let clients = PyModule::import(py, "midirp._clients")?;
+    for name in [
+        "MidiInput",
+        "MidiInputPort",
+        "MidiInputConnection",
+        "MidiOutput",
+        "MidiOutputPort",
+        "MidiOutputConnection",
+    ] {
+        let class = clients.getattr(name)?;
+        class.setattr("__module__", "midirp.midi")?;
+        module.add(name, class)?;
+    }
     Ok(())
 }

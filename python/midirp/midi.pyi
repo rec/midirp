@@ -16,7 +16,7 @@ class PortInfoError(MidiError):
     """Port information could not be retrieved."""
 
 class ConnectError(MidiError):
-    """A connection could not be opened; the client remains available."""
+    """A connection could not be opened; isolated clients become unusable."""
 
 class SendError(MidiError):
     """A MIDI message could not be sent."""
@@ -54,7 +54,9 @@ class MidiOutputPort:
 class MidiInput:
     """An input client that cannot be used while its connection is open."""
 
-    def __init__(self, client_name: str) -> None: ...
+    def __init__(
+        self, client_name: str, *, isolated: bool = True, timeout: float = 5.0
+    ) -> None: ...
     def ports(self) -> list[MidiInputPort]: ...
     def port_name(self, port: MidiInputPort) -> str: ...
     def find_port_by_id(self, id: str) -> MidiInputPort | None: ...
@@ -76,7 +78,9 @@ class MidiInput:
 class MidiOutput:
     """An output client that cannot be used while its connection is open."""
 
-    def __init__(self, client_name: str) -> None: ...
+    def __init__(
+        self, client_name: str, *, isolated: bool = True, timeout: float = 5.0
+    ) -> None: ...
     def ports(self) -> list[MidiOutputPort]: ...
     def port_name(self, port: MidiOutputPort) -> str: ...
     def find_port_by_id(self, id: str) -> MidiOutputPort | None: ...
@@ -84,8 +88,12 @@ class MidiOutput:
     def create_virtual(self, port_name: str) -> MidiOutputConnection: ...
 
 class MidiInputConnection:
-    """Close restores the client unless a caught panic permanently disabled it."""
+    """Successful close restores the client; isolated native failures disable it."""
 
+    @property
+    def dropped_messages(self) -> int:
+        """Queue overflow count in isolated mode; zero in native mode."""
+        ...
     @property
     def closed(self) -> bool:
         """A momentary ownership snapshot; does not reserve the connection."""
@@ -104,7 +112,7 @@ class MidiInputConnection:
     ) -> None: ...
 
 class MidiOutputConnection:
-    """Close restores the client unless a caught panic permanently disabled it."""
+    """Successful close restores the client; isolated native failures disable it."""
 
     def send(self, message: bytes) -> None:
         """Serialized with send/close; competing threads have no guaranteed order."""

@@ -1,0 +1,380 @@
+"""Production ownership and IPC exercised against controlled child faults."""
+
+import gc
+import inspect
+import sys
+import weakref
+from collections.abc import Iterator
+from pathlib import Path
+from queue import Queue
+from subprocess import Popen
+from threading import Event, Thread
+from time import monotonic, sleep
+from unittest.mock import patch
+
+import pytest
+from midirp import midi
+from midirp._transport import RECEIVE_CAPACITY, Context, Delivery, shutdown
+
+
+@pytest.fixture
+def workers(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Popen[bytes]]]:
+    children: list[Popen[bytes]] = []
+    fixture = Path(__file__).parent / "native" / "midirp_worker.py"
+
+    def launch(command: list[str], stdin: int, stdout: int) -> Popen[bytes]:
+        assert command == [sys.executable, "-m", "midirp._worker"]
+        child = Popen([sys.executable, str(fixture)], stdin=stdin, stdout=stdout)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr("midirp._transport.subprocess.Popen", launch)
+    yield children
+    for c in children:
+        if c.poll() is None:
+            c.kill()
+        c.wait(timeout=3)
+
+
+def test_defaults_select_isolation_and_five_second_deadlines() -> None:
+    for c in (midi.MidiInput, midi.MidiOutput):
+        parameters = inspect.signature(c).parameters
+        assert parameters["isolated"].default is True
+        assert parameters["timeout"].default == 5.0
+
+
+def test_partial_thread_startup_failure_terminates_and_reaps_its_child(
+    workers: list[Popen[bytes]],
+) -> None:
+    start = Thread.start
+    attempts = 0
+
+    def limited_start(thread: Thread) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise RuntimeError("thread quota reached")
+        start(thread)
+
+    with patch.object(Thread, "start", limited_start):
+        with pytest.raises(RuntimeError, match="thread quota"):
+            midi.MidiOutput("output")
+    assert len(workers) == 1
+    assert workers[0].poll() is not None
+
+
+@pytest.mark.parametrize("client", [midi.MidiInput, midi.MidiOutput])
+def test_in_process_mode_does_not_start_child_processes(
+    client: type[midi.MidiInput] | type[midi.MidiOutput], workers: list[Popen[bytes]]
+) -> None:
+    class LocalClient:
+        def __init__(self, name: str) -> None:
+            pass
+
+        def ports(self) -> list[object]:
+            return []
+
+    with (
+        patch("midirp._native.MidiInput", LocalClient),
+        patch("midirp._native.MidiOutput", LocalClient),
+    ):
+        local = client("local", isolated=False)
+        assert local.ports() == []
+    assert not workers
+
+
+def test_old_connection_generations_cannot_close_or_send_through_a_reopened_client(
+    workers: list[Popen[bytes]],
+) -> None:
+    context = Context(1)
+    context.request("init", ["output", "output"])
+    context.open("connect", "output", "old", None)
+    old_generation = context.generation
+    context.close(old_generation)
+    context.open("connect", "output", "new", None)
+    context.close(old_generation)
+    with pytest.raises(RuntimeError, match="closed"):
+        context.request("send", [b"\xf8", old_generation], serial=True)
+    context.request("send", [b"\xf8", context.generation], serial=True)
+    context.close(context.generation)
+    context.fail("test finished")
+    workers[0].wait(timeout=3)
+
+
+def test_isolated_discovery_send_close_and_reopen_use_the_same_client(
+    workers: list[Popen[bytes]],
+) -> None:
+    output = midi.MidiOutput("check_bytes")
+    (port,) = output.ports()
+    assert port.id() == "output"
+    assert output.port_name(port) == "output port"
+    assert output.find_port_by_id("output") == port
+    assert output.find_port_by_id("absent") is None
+    with pytest.raises(TypeError):
+        hash(port)
+    for _ in range(2):
+        with output.connect(port, "test") as connection:
+            with pytest.raises(RuntimeError, match="unavailable"):
+                output.ports()
+            connection.send(b"\xf0\x7d\x00\xff\xf7")
+        assert connection.closed
+        connection.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            connection.send(b"\xf8")
+    assert len(workers) == 1
+    del output, connection
+    workers[0].wait(timeout=3)
+
+
+@pytest.mark.parametrize("mode", ["hang_send", "crash_send", "native_error"])
+def test_native_failure_invalidates_only_its_worker_and_requires_a_fresh_client(
+    mode: str, workers: list[Popen[bytes]]
+) -> None:
+    broken = midi.MidiOutput(mode, timeout=1)
+    healthy = midi.MidiOutput("healthy")
+    bad_connection = broken.connect(broken.ports()[0], "test")
+    good_connection = healthy.connect(healthy.ports()[0], "test")
+    error = (
+        TimeoutError
+        if mode == "hang_send"
+        else midi.SendError
+        if mode == "native_error"
+        else RuntimeError
+    )
+    started = monotonic()
+    with pytest.raises(error):
+        bad_connection.send(b"\xf8")
+    assert monotonic() - started < 3
+    assert bad_connection.closed
+    with pytest.raises(RuntimeError, match="new client"):
+        broken.ports()
+    with pytest.raises(RuntimeError, match="new client"):
+        bad_connection.close()
+    good_connection.send(b"\xf8")
+    good_connection.close()
+    workers[0].wait(timeout=3)
+    assert workers[1].poll() is None
+    fresh = midi.MidiOutput("fresh")
+    with fresh.connect(fresh.ports()[0], "test") as connection:
+        connection.send(b"\xf8")
+
+
+def test_native_close_timeout_consumes_parent_ownership_without_restoring_a_client(
+    workers: list[Popen[bytes]],
+) -> None:
+    output = midi.MidiOutput("hang_close", timeout=1)
+    connection = output.connect(output.ports()[0], "test")
+    with pytest.raises(TimeoutError):
+        connection.close()
+    assert connection.closed
+    workers[0].wait(timeout=3)
+    with pytest.raises(RuntimeError, match="new client"):
+        output.ports()
+
+
+def test_failed_open_discards_the_worker_instead_of_restoring_a_suspect_native_client(
+    workers: list[Popen[bytes]],
+) -> None:
+    output = midi.MidiOutput("failed_open")
+    with pytest.raises(midi.ConnectError, match="vanished"):
+        output.connect(output.ports()[0], "test")
+    workers[0].wait(timeout=3)
+    with pytest.raises(RuntimeError, match="new client"):
+        output.ports()
+
+
+def test_ambiguous_port_ids_are_rejected_before_opening(
+    workers: list[Popen[bytes]],
+) -> None:
+    source = midi.MidiInput("ambiguous")
+    with pytest.raises(midi.PortInfoError, match="ambiguous"):
+        source.connect(source.ports()[0], "test", lambda t, m: None)
+    workers[0].wait(timeout=3)
+
+
+def test_input_callback_can_receive_during_open_without_being_pickled(
+    workers: list[Popen[bytes]],
+) -> None:
+    messages: Queue[tuple[int, bytes]] = Queue()
+
+    def receive(timestamp: int, message: bytes) -> None:
+        messages.put((timestamp, message))
+
+    source = midi.MidiInput("early")
+    with source.connect(source.ports()[0], "test", receive) as connection:
+        assert messages.get(timeout=3) == (17, b"\x90\x3c\x7f")
+        assert connection.dropped_messages == 0
+
+
+def test_parent_queue_drops_new_messages_and_counts_both_queue_stages() -> None:
+    started = Event()
+    release = Event()
+    finished = Event()
+    messages: list[int] = []
+
+    def receive(timestamp: int, message: bytes) -> None:
+        messages.append(timestamp)
+        started.set()
+        assert release.wait(3)
+        finished.set()
+
+    delivery = Delivery(receive)
+    delivery.enqueue(0, b"\xf8", 7)
+    assert started.wait(3)
+    for i in range(1, RECEIVE_CAPACITY + 4):
+        delivery.enqueue(i, b"\xf8", 7)
+    assert delivery.dropped == 3
+    assert delivery.worker_dropped == 7
+    # Delayed forwarding must not undo a newer control-reply snapshot.
+    delivery.enqueue(RECEIVE_CAPACITY + 4, b"\xf8", 3)
+    assert delivery.worker_dropped == 7
+    assert delivery.dropped == 4
+    delivery.retire()
+    release.set()
+    delivery.bridge.drain()
+    assert finished.wait(3)
+    assert messages == [0]
+
+
+def test_child_queue_overflow_is_exposed_after_native_close(
+    workers: list[Popen[bytes]],
+) -> None:
+    source = midi.MidiInput("burst")
+    connection = source.connect(source.ports()[0], "test", lambda t, m: None)
+    connection.close()
+    assert connection.dropped_messages > 0
+
+
+def test_explicit_close_waits_for_parent_callback_without_cancelling_it(
+    workers: list[Popen[bytes]],
+) -> None:
+    started = Event()
+    release = Event()
+    closing = Event()
+    finished: Queue[object] = Queue()
+
+    def receive(timestamp: int, message: bytes) -> None:
+        started.set()
+        assert release.wait(3)
+
+    source = midi.MidiInput("early", timeout=1)
+    connection = source.connect(source.ports()[0], "test", receive)
+    assert started.wait(3)
+
+    def close() -> None:
+        closing.set()
+        connection.close()
+        finished.put(None)
+
+    thread = Thread(target=close)
+    thread.start()
+    assert closing.wait(3)
+    try:
+        sleep(0.15)
+        assert finished.empty()
+    finally:
+        release.set()
+        thread.join(timeout=3)
+    assert finished.get(timeout=3) is None
+    assert connection.closed
+
+
+def test_shutdown_terminates_and_reaps_a_child_stuck_in_native_close(
+    workers: list[Popen[bytes]],
+) -> None:
+    output = midi.MidiOutput("hang_close", timeout=1)
+    connection = output.connect(output.ports()[0], "test")
+    started = monotonic()
+    with patch("midirp._transport.SHUTTING_DOWN", False):
+        shutdown()
+        with pytest.raises(RuntimeError, match="shutdown"):
+            midi.MidiOutput("late client")
+    assert monotonic() - started < 3
+    assert connection.closed
+    assert workers[0].poll() is not None
+
+
+def test_initialization_timeout_reaps_the_new_worker(
+    workers: list[Popen[bytes]],
+) -> None:
+    with pytest.raises(TimeoutError):
+        midi.MidiOutput("hang_init", timeout=1)
+    workers[0].wait(timeout=3)
+
+
+def test_callback_and_error_hook_cannot_start_or_send_native_work(
+    workers: list[Popen[bytes]],
+) -> None:
+    reported = Event()
+    errors: list[str] = []
+    output = midi.MidiOutput("output")
+    target = output.connect(output.ports()[0], "test")
+
+    def receive(timestamp: int, message: bytes) -> None:
+        target.send(message)
+
+    def error_hook(event: object) -> None:
+        try:
+            midi.MidiInput("forbidden")
+        except RuntimeError as error:
+            errors.append(str(error))
+        reported.set()
+
+    source = midi.MidiInput("early")
+    with patch("sys.unraisablehook", error_hook):
+        connection = source.connect(source.ports()[0], "test", receive)
+        assert reported.wait(3)
+        connection.close()
+    assert len(errors) == 1
+    assert "callback" in errors[0]
+    assert len(workers) == 2
+    target.send(b"\xf8")
+    target.close()
+
+
+def test_cyclic_collection_releases_the_client_and_child(
+    workers: list[Popen[bytes]],
+) -> None:
+    source = midi.MidiInput("quiet")
+
+    class Receiver:
+        connection: midi.MidiInputConnection
+
+        def __call__(self, timestamp: int, message: bytes) -> None:
+            pass
+
+    receiver = Receiver()
+    connection = source.connect(source.ports()[0], "test", receiver)
+    receiver.connection = connection
+    reference = weakref.ref(connection)
+    del receiver, connection, source
+    gc.collect()
+    assert reference() is None
+    workers[0].wait(timeout=3)
+
+
+def test_destruction_schedules_close_and_restores_a_still_live_client(
+    workers: list[Popen[bytes]],
+) -> None:
+    output = midi.MidiOutput("output")
+    connection = output.connect(output.ports()[0], "test")
+    del connection
+    deadline = monotonic() + 3
+    while True:
+        try:
+            ports = output.ports()
+            break
+        except RuntimeError:
+            assert monotonic() < deadline
+            sleep(0.01)
+    assert len(ports) == 1
+    assert workers[0].poll() is None
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_invalid_deadlines_are_rejected_before_starting_a_worker(
+    timeout: float, workers: list[Popen[bytes]]
+) -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        midi.MidiOutput("invalid", timeout=timeout)
+    assert not workers

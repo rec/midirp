@@ -17,6 +17,12 @@ def test_wheels_include_typed_api_and_matching_version_metadata() -> None:
             names = archive.namelist()
             assert "midirp/midi.pyi" in names
             assert "midirp/py.typed" in names
+            assert {
+                "midirp/_clients.py",
+                "midirp/_transport.py",
+                "midirp/_worker.py",
+                "midirp/_native.pyi",
+            } <= set(names)
             assert archive.read("midirp/__init__.py") == b""
             assert any(
                 n.startswith("midirp/midi.") and n.endswith((".so", ".pyd"))
@@ -58,8 +64,14 @@ def test_source_distribution_contains_build_typing_and_test_sources() -> None:
                 "THIRD_PARTY_NOTICES.md",
                 "python/midirp/midi.pyi",
                 "python/midirp/py.typed",
+                "python/midirp/_clients.py",
+                "python/midirp/_transport.py",
+                "python/midirp/_worker.py",
+                "python/midirp/_native.pyi",
                 "src/lib.rs",
                 "src/lifecycle.rs",
                 "test/native/midirp_callbacks.py",
+                "test/native/midirp_worker.py",
+                "test/test_isolation.py",
             } <= names
             assert not any(n.startswith(("target/", ".venv/", ".git/")) for n in names)

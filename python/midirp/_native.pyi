@@ -4,8 +4,6 @@ from collections.abc import Callable
 from types import TracebackType
 from typing import ClassVar
 
-__version__: str
-
 class CallbackBridge:
     def __init__(self, callable: Callable[[int, bytes], object]) -> None: ...
     def deliver(self, timestamp: int, message: bytes) -> None: ...

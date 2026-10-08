@@ -17,7 +17,7 @@ Silence does not establish that a device disconnected; no health guarantee or
 hotplug detection is invented.
 
 Callbacks remain in the parent process on a dispatch thread. Both child and
-parent receive queues have fixed capacities and drop new messages on overflow.
+parent receive queues each hold 128 messages and have fixed capacities and drop new messages on overflow.
 The input connection exposes `dropped_messages`, including both queue stages.
 Capacity counts messages, not bytes; exceptionally large messages still use
 memory. Native timestamps and bytes are forwarded unchanged. The existing Rust
@@ -26,7 +26,8 @@ callable retirement, and draining in the parent. User callbacks are not pickled.
 
 Explicit close retires incoming delivery and waits for admitted parent callbacks
 as well as native teardown. The native-operation timeout cannot cancel arbitrary
-parent Python code. Destruction schedules cleanup without waiting for a driver.
+parent Python code. Destruction schedules cleanup without waiting for a driver. Client disposal
+requests graceful child shutdown before forced termination on its deadline.
 Interpreter exit stops isolated children even when their drivers cannot close;
 process termination does not reset hardware notes or repair an OS driver.
 

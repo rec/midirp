@@ -1,6 +1,7 @@
 """Native interpreter-exit fixture, invoked only by the opt-in loopback test."""
 
 import atexit
+from os import environ
 from threading import Event
 from uuid import uuid4
 
@@ -18,9 +19,10 @@ def receive(timestamp: int, message: bytes) -> None:
 
 def open_connections() -> tuple[midi.MidiInputConnection, midi.MidiOutputConnection]:
     token = f"midirp-shutdown-{uuid4().hex}"
-    source = midi.MidiInput("midirp shutdown input")
+    isolated = environ.get("MIDIRP_TEST_ISOLATED", "1") == "1"
+    source = midi.MidiInput("midirp shutdown input", isolated=isolated)
     incoming = source.create_virtual(token, receive)
-    target = midi.MidiOutput("midirp shutdown output")
+    target = midi.MidiOutput("midirp shutdown output", isolated=isolated)
     (port,) = (p for p in target.ports() if token in target.port_name(p))
     outgoing = target.connect(port, token)
     outgoing.send(b"\x90\x3c\x7f")

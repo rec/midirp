@@ -36,6 +36,33 @@ Standard wheels use the ALSA backend and no optional midir features.
 Cargo owns version `0.1.0`. The pinned build uses midir 0.11.0, PyO3 0.29.3,
 and maturin 1.15.0. Wheels are interpreter-specific rather than abi3.
 
+## Process isolation
+
+Each client defaults to a fresh MIDI child process:
+
+```python
+from midirp import midi
+
+output = midi.MidiOutput("my application", isolated=True, timeout=5.0)
+```
+
+There is one process per client, which can own one live connection. Input and
+output on the same physical device use separate processes. The deadline covers
+native operations and their pipe communication. A timeout raises `TimeoutError`;
+a crash raises `RuntimeError`. Either failure, or any returned native error,
+invalidates that client and connection and terminates its worker. Create a new
+client and rediscover deliberately. Sends and connections are never retried.
+An idle input does not trigger a timeout or establish device health.
+
+Set `isolated=False` on either constructor for native MIDI in the current process.
+This saves child interpreters, communication threads, copies, and scheduling
+overhead. Native operations then have no enforceable deadline; `timeout` does
+not cancel them. Isolation adds startup cost and receive latency. It contains a
+worker failure but cannot repair a shared OS MIDI service or driver.
+Workers use local pipes and a fresh interpreter; no multiprocessing main guard,
+network service, or picklable user callback is required. Frozen/embedded
+interpreters have not been validated.
+
 ## Discover and select a port
 
 ```python
@@ -54,6 +81,9 @@ output handles are different types. Discovery can race with unplugging.
 Finding a port or reading its name does not reserve it: either metadata lookup
 or a later connect can fail if the device disappears. Handle errors from the
 operation itself; another presence check cannot prevent this race.
+Isolated handles cache opaque ID snapshots; equality compares IDs within the
+same direction. Opening resolves the ID again and rejects absent or ambiguous
+matches. Native-mode handles retain midir's original equality behavior.
 
 ```python
 from midirp import midi
@@ -70,8 +100,9 @@ def play_note(port_id: str) -> None:
 
 `send()` accepts immutable `bytes` only. Convert mutable buffers explicitly.
 Bytes are forwarded unchanged; midir handles message validity. A native send
-error leaves the connection open. Concurrent sends and close share a native
-lock, with the GIL released; close waits for a send already in progress.
+error invalidates an isolated worker; in-process ordinary send errors leave the
+connection open. Sends and close are serialized. In-process native waits release
+the GIL; isolated waits use the configured deadline.
 Competing threads have no guaranteed send order or priority over close.
 Starting close does not cancel an active send. Use one controlling thread for
 sending and closing when message order matters.
@@ -97,8 +128,9 @@ def receive_one(port_id: str) -> tuple[int, bytes]:
         return messages.get(timeout=5)
 ```
 
-The callback receives `(timestamp: int, message: bytes)` directly on the native
-MIDI callback thread. Owned bytes remain valid after the callback returns.
+The callback receives `(timestamp: int, message: bytes)` on a parent dispatch
+thread in isolated mode, or on the native MIDI thread in in-process mode.
+Owned bytes remain valid after the callback returns.
 Timestamps preserve midir's microsecond values and backend origin; do not compare
 unrelated connections' clocks. Return values are ignored. Exceptions are reported
 to `sys.unraisablehook` with the callable as context; later messages still arrive.
@@ -116,7 +148,13 @@ successfully, no callbacks remain active or will be accepted for that connection
 
 Keep callbacks short. The GIL, OS scheduling, and backend buffers prevent hard
 real-time guarantees or a promise of no loss under load. The example uses an
-application-owned queue; the binding provides no buffering or queue API.
+application-owned queue. Isolated delivery has two bounded queues, one in each
+process, each holding at most 128 messages. A full queue drops the new message.
+Read `connection.dropped_messages` for their combined overflow count. Child
+counts arrive with messages/control replies and are current after successful
+close; a crashed worker can lose its final count. This counts queue overflow,
+not driver loss or messages discarded during close. There is no byte-size budget
+or hard throughput guarantee. Native mode reports zero and adds no receive queue.
 Blocking MIDI operations from a callback or its error hook raise `RuntimeError`
 before entering the backend or waiting for a native lock. This includes client
 creation, discovery, metadata, port IDs/comparisons, filter changes, opening,
@@ -132,7 +170,8 @@ and choose an explicit queue overflow policy.
 The default filter is `Ignore.NONE`. Combine `SYSEX`, `TIME`, and `ACTIVE_SENSE`
 with `|`. `Ignore.ALL` combines these three filters; note messages still arrive.
 `Ignore(bits)` accepts integer masks 0–7; `int(flags)` returns the mask. Configure
-filters before connecting. Configuration survives failed opens and close.
+filters before connecting. Configuration survives successful close. In-process
+ordinary failed opens preserve configuration subject to upstream rollback defects.
 
 ## Virtual ports
 
@@ -167,11 +206,14 @@ A connection owns its native resource and keeps its original Python client alive
 While connecting, connected, or closing, that client rejects other operations.
 Concurrent discovery, metadata, or configuration on the same client raises
 `RuntimeError` immediately if another client operation is in progress.
-Failed opens restore the same native client. `close()` is synchronous and
-idempotent, restores the client for reuse, and waits for concurrent teardown.
+Isolated failed native opens invalidate the client. In-process ordinary failed
+opens restore the same native client, subject to upstream rollback defects.
+Successful `close()` is synchronous and idempotent, restores the client for
+reuse, and waits for concurrent teardown.
 `closed` is a nonblocking ownership-state snapshot. It remains false during
 teardown and becomes true after client restoration; it does not report device
-health. Context-manager exit closes the connection
+health. An isolated worker failure also makes `closed` true.
+Context-manager exit closes the connection
 and propagates body exceptions. Handles cannot be constructed directly.
 
 Reading `closed` or entering a context manager does not reserve the connection
@@ -191,6 +233,7 @@ a context manager does not prevent another owner from closing it.
 | Busy/unavailable client, closed connection, blocking MIDI call from callback | `RuntimeError` |
 | Caught native panic or subsequently failed resource | `RuntimeError` |
 | Virtual ports on Windows | `NotImplementedError` |
+| Isolated operation exceeds its configured deadline | `TimeoutError` |
 
 The four native errors inherit from `MidiError` and retain upstream detail.
 There is no automatic retry, reconnection, or promise of immediate unplug
@@ -200,7 +243,9 @@ Caught Rust panics in native client creation, discovery/configuration, port
 metadata, connect, send, or close become `RuntimeError`. Panics during client
 operations permanently disable that client; connect/send/close panics also
 disable the connection. Create a fresh client explicitly. An ordinary returned
-native error continues to use its usual exception and ownership behavior.
+native error keeps its exception class; isolated mode additionally disables the
+client and stops its child. The following native ownership details apply to
+in-process mode.
 A failed send may still own a native handle: close attempts teardown, but reports
 the failed state even if teardown completes. `closed` indicates consumed native
 ownership, including after a teardown panic; it does not prove successful OS
@@ -215,35 +260,39 @@ memory corruption, allocation failure that aborts the process, or panics across
 non-unwinding OS callback boundaries. Rust's panic diagnostics may also appear
 on standard error.
 
-Native open, discovery, send, and close have no guaranteed completion deadline.
-For example, WinMM can retry indefinitely while a driver stays busy. A callback
-or error hook that never returns can also prevent close and interpreter shutdown.
-Releasing the GIL allows other Python threads to run; it cannot cancel a hung
-native call or stop arbitrary callback code. A timeout around a calling thread
-does not cancel its operation. Applications requiring guaranteed recovery from
-these failures need a separate process boundary.
+In-process native open, discovery, send, and close have no guaranteed deadline.
+For example, WinMM can retry indefinitely while a driver stays busy. Isolated
+native operations time out and terminate their child. A parent callback or error
+hook that never returns can still prevent explicit close and interpreter shutdown.
+The deadline cannot cancel arbitrary Python code or a C extension retaining the
+GIL. User callback draining has no timeout, in either mode.
 
-Import starts four native cleanup workers for the main interpreter, without
-initializing a MIDI backend. They only tear down resources; callbacks
-remain on midir's thread. At most 32 connections may be opening, live, or
-awaiting cleanup. An open beyond this capacity raises `RuntimeError` before
-consuming its client. Explicitly closed connections release capacity; a queued
-job keeps its reservation until a worker consumes it. Each resource is queued
-at most once, so cleanup storage and registry scans remain bounded. A stalled
-worker leaves the others available, but four stalled workers can still prevent
-cleanup and shutdown.
+Import starts four native cleanup workers in the main interpreter without
+initializing MIDI. Each isolated child also imports its native cleanup pool.
+In-process mode permits at most 32 connections opening, live, or awaiting
+cleanup; stalled teardown keeps its reservation. Isolated mode starts a process
+for each client with its own pool and one connection, without a global client
+quota. Interpreter memory, threads, pipes, and native resources grow with client
+count. Resource exhaustion can reject startup or terminate a worker.
 
-Destruction and cyclic GC disable delivery immediately
-and queue teardown without blocking Python. Client restoration is asynchronous
-in that case; use explicit close when reuse must be immediate. Callback references
-are visible to Python's collector.
+Destruction and cyclic GC retire delivery and schedule teardown without waiting
+for a native driver. Client restoration is asynchronous; use explicit close for
+immediate reuse. Dropping an isolated client schedules graceful worker shutdown,
+with forced termination on timeout. Worker exit reclaims its retained CoreMIDI
+clients; in-process CoreMIDI clients remain retained upstream until process exit.
+Callback references are visible to Python's collector. Virtual endpoints disappear
+when teardown completes, which can affect applications connected to them.
+Closing does not send all-notes-off or restore physical device state.
 
-An `atexit` handler rejects new registrations, disables delivery, drains active
-callbacks and live resources with the GIL released, and joins the cleanup workers
-before finalization. A callback that never returns can prevent clean shutdown.
-Forced termination bypassing `atexit` does not run Python cleanup.
-Subinterpreters are rejected. Starting a fresh interpreter is required for a
-child process; forking with the worker or live MIDI resources is unsupported.
+At interpreter exit, isolated delivery is retired, workers receive shutdown,
+and native workers exceeding the deadline are terminated and reaped. Admitted
+parent callbacks are then drained. In-process native cleanup still drains and
+joins its workers with the GIL released and can hang on drivers or callbacks.
+Exit-handler ordering and callback application locks remain the application's
+responsibility. Forced parent termination bypasses these handlers; graceful
+child cleanup is then not guaranteed. Subinterpreters are rejected. Forking
+with imported MIDI runtime state or live resources is unsupported; use a fresh
+interpreter. Standard GIL-enabled CPython is the tested contract.
 
 ## Development and native validation
 

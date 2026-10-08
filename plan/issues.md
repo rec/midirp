@@ -5,8 +5,8 @@
 Source review dated 2026-10-08, against binding commit `b7f50d0`, midir
 0.11.0, PyO3 0.29.3, and the transitive CoreMIDI wrapper coremidi 0.9.2.
 This is an issue inventory and proposed investigation plan, not a claim that
-every failure below has been reproduced. No implementation changes or new
-runtime checks were made for this review.
+every failure below has been reproduced. Later fixes and authorized checks
+are reflected below; backend defects remain unless explicitly resolved.
 Open findings are updated as fixes land; resolved issues are removed.
 Remove resolved issue text in the last commit of its fix series.
 
@@ -58,10 +58,11 @@ references and function names refer to that pinned source, not a newer release.
 
 ## Liveness, concurrency, and shutdown
 
-Agreed approach: retain the in-process binding and reduce avoidable waits.
-Guaranteed native-operation or shutdown deadlines would require process
-isolation and remain outside this implementation. L issues are handled
-sequentially, with focused device-free checks and separate commits.
+Default isolation now bounds native-operation waits, terminates a failed child,
+and requires a fresh client. In-process mode remains available explicitly.
+Worker hangs/crashes, overflow accounting, and lifecycle behavior have controlled
+subprocess coverage. Remaining liveness limits concern parent callbacks,
+in-process native waits, interpreter lifecycle, and shared OS services.
 
 ### L6. Interpreter shutdown and process lifecycle have additional constraints
 
@@ -74,9 +75,12 @@ Application callback waits can still deadlock draining: a callback must not
 wait for its closer, acquire a lock held by its closer, or block on a full queue
 whose consumer has stopped to close input. The MIDI API guard does not detect
 application synchronization or calls into other libraries.
-The bounded four-worker pool cannot progress if all workers are stuck in native
-teardown or callback draining. Native calls have no safe general cancellation
-mechanism; bounded shutdown still requires process isolation.
+In-process mode still cannot progress if all four cleanup workers are stuck in
+native teardown or callback draining. Default isolation contains those native
+waits through child termination; it does not cancel parent callback code or
+repair an OS MIDI service. OS failure to terminate/reap a child also prevents an
+absolute whole-system shutdown guarantee. Parent startup/resource-allocation
+work is not covered by the native-operation deadline.
 Handler ordering matters: a callback waiting for an event set by a later-running
 exit handler can stop MIDI shutdown from completing. A callback running a C
 extension that blocks while retaining the GIL can prevent Python shutdown from
@@ -105,18 +109,18 @@ either safely works or cleanly fails.
 `create_virtual()`, [midir's ALSA backend](https://github.com/Boddlnagg/midir/blob/v0.11.0/src/backend/alsa/mod.rs)
 moves `self.seq` into `HandlerData` before spawning the reader thread. On spawn
 failure it returns `ConnectError` containing `self`, whose `seq` is now `None`.
-The Python binding restores that object as `Available`. Later discovery or
+In-process mode restores that object as `Available`. Later discovery or
 connect operations unwrap the missing sequencer and panic upstream. The binding
 now catches that panic and disables the client, but the returned failed-open
 client is still unusable.
 
-This contradicts the unqualified README/stub promise that failed opens leave a
-usable client. Thread exhaustion is a concrete trigger. The binding's own
-mocked returned-error tests do not exercise this upstream path.
+Default isolated mode discards the worker immediately on its returned native
+error, containing subsequent use and reclaiming its resources at process exit.
+The defective native rollback remains in `isolated=False`. Thread exhaustion is
+a concrete trigger. Mocked returned-error checks do not exercise that ALSA path.
 
 **Proposed next work:** fault-inject thread-start failure and pursue upstream
-rollback or a narrowly designed binding response. Do not silently retry the
-returned client on this failure.
+rollback. Do not silently retry the returned client on this failure.
 
 ### B2. ALSA failed opens can retain native allocations
 
@@ -234,9 +238,9 @@ that the physical receiver processed it or stayed responsive.
 | --- | --- | --- |
 | Unplug before connect | Missing lookup, metadata error, connect error, or stale identity | Rediscover deliberately; discovery is not atomic with connect. |
 | Unplug during input | Silence, discarded/partial messages, backend logging, or native failure | No guaranteed immediate Python notification. |
-| Unplug during output | Send error, accepted data later lost, or blocked driver operation | Delivery and bounded completion are not guaranteed. |
+| Unplug during output | Send error, accepted data later lost, or blocked driver operation | Delivery is not guaranteed; isolated waits have a deadline. |
 | Replug or device reboot | Changed ports/IDs, reused IDs, fresh driver handle, or continued silence on old connection | Existing handles are not a reconnection mechanism. |
-| Driver/MIDI service crash or restart | Invalid handles, stale metadata, native errors, hanging calls, or process failure | Same-process recovery is not established. |
+| Driver/MIDI service crash or restart | Invalid handles, stale metadata, native errors, hanging calls, or process failure | Default mode discards the affected worker; OS-service recovery is not established. |
 | Device stays connected but stops responding | Normal-looking sends and no useful replies | Detect using device-specific request/reply deadlines if its protocol supports them. |
 | Process crashes while notes are active | OS reclaims some resources; physical notes/controller state may persist | Cleanup is not musical-state restoration. |
 
@@ -247,6 +251,14 @@ The library supplies no transaction or acknowledgment layer. Filters that
 suppress active sensing or timing also suppress those signals for an
 application using them to infer health.
 
+During authorized isolated CoreMIDI virtual-port churn, a long-lived discovery
+worker returned a stale endpoint ID `"0"`; name lookup raised `PortInfoError`.
+Its worker was invalidated as designed, and a fresh client could discover and
+exchange messages with the replacement endpoint. Some earlier churn runs also
+produced initialization errors or a five-second initialization timeout. Their
+cause is unestablished. The final 52-case software-only run passed after healthy
+worker disposal was made graceful; that does not prove driver/hotplug stability.
+
 ### D2. IDs and names are useful selectors, not permanent identities
 
 **Confirmed in source and API limitation.** Names can duplicate. ALSA IDs are
@@ -254,7 +266,9 @@ client/port addresses, which can be reused after client disappearance. macOS
 IDs depend on native unique-ID property reads; failed reads become the string
 `"0"` upstream instead of raising an error. Multiple such failures can collide.
 CoreMIDI equality also returns false when those properties cannot be read, so
-even self-comparison of a stale handle can behave unexpectedly.
+even self-comparison of a stale native-mode handle can behave unexpectedly.
+Isolated handles compare cached IDs and reject ambiguous matches at open, but
+cannot detect an ID reused for a different endpoint.
 
 WinMM enumerates interfaces and can skip ports when metadata retrieval fails.
 Its stored name is returned without a fresh liveness check. An empty discovery
@@ -277,10 +291,10 @@ to a hardware endpoint opens a native connection; it does not create hardware.
 
 | Object/lifetime event | Current behavior and external effect |
 | --- | --- |
-| Import `midirp.midi` | Starts one cleanup thread and registers exit cleanup, without initializing MIDI. Import can fail if that thread cannot be started. |
+| Import `midirp.midi` | Starts four native cleanup threads and registers exit cleanup, without initializing MIDI. Import can fail if that thread cannot be started. |
 | Create then immediately discard an unused client on ALSA | Opens then drops its sequencer resource. Registration changes may be visible to other clients. No MIDI messages are intentionally sent. |
 | Create then immediately discard an unused client on WinMM | Constructors retain filter state or an empty output client and ignore client names; native handles open at connect time. |
-| Create then immediately discard an unused client on CoreMIDI | Allocates a native CoreMIDI client that upstream deliberately retains until process termination. Python destruction does not dispose it. |
+| Create then immediately discard an unused client on CoreMIDI | Allocates a native CoreMIDI client that upstream deliberately retains until process termination. In-process destruction does not dispose it; default worker exit reclaims it. |
 | Drop the client variable while retaining its connection | The connection keeps the original Python client alive. The connection remains usable. |
 | Drop the last connection reference | Retires input delivery and queues native close. Completion and client restoration are asynchronous. |
 | Drop a connection participating in a Python reference cycle | GC can find the tracked callback/client edges, but collection timing is not deterministic. External references or application objects can retain it. |
@@ -291,20 +305,20 @@ The [coremidi 0.9.2 client source](https://docs.rs/crate/coremidi/0.9.2/source/s
 has its `Drop` implementation commented out, intentionally avoiding explicit
 `MIDIClientDispose`. Its comment explains the upstream concern about disposing
 the last client and later recreating it. Repeated client creation in a long-lived
-Python process therefore retains native clients until process exit. Reuse
+in-process runtime therefore retains native clients until process exit. Reuse
 clients when possible. This is an upstream lifetime policy, not a leaked Python
 callback or a reason to dispose clients blindly in this binding.
 
 Native ports and virtual endpoints have their own disposal paths; retaining a
 CoreMIDI client does not imply retaining every closed virtual endpoint. Conversely,
 automatic connection close does not promise instantaneous endpoint removal.
-Unused client destruction is not routed through the connection cleanup worker;
-where native client destruction does work, it can run on the Python destructor
-thread and is not protected by the connection's detached-close path.
+Default unused-client destruction schedules graceful child shutdown with forced
+termination on timeout. In-process unused-client destruction can run on the
+Python destructor thread and is not protected by detached connection close.
 
 **Answer to the system-disturbance question:** ordinary creation/discard does
 not intentionally reset unrelated devices or send MIDI. It can change visible
-client/port topology, and macOS native client resources accumulate. Creating
+client/port topology, and in-process macOS native clients accumulate. Creating
 then dropping a virtual endpoint affects peers using that endpoint. Windows
 output teardown calls `midiOutReset` on its own open handle; broader effects
 depend on driver/device semantics. There is no tested guarantee of zero effects
@@ -324,11 +338,13 @@ though the context manager closes correctly.
 | --- | --- | --- |
 | Python/native heap | Owned input `bytes`, native message vectors, outgoing SysEx copies/buffers, port lists | Large messages and retained messages consume memory; allocator failures are not uniformly translated to Python exceptions. |
 | SysEx assembly storage | CoreMIDI/ALSA append until completion | Missing `F7` plus continuing packets can grow buffers without a size/deadline cap; no callback is delivered for the unfinished message. |
+| Isolated receive queues | 128 messages in the child and 128 in the parent; drop newest and count | Capacity is in messages, not bytes. Worker crashes can lose the final counter; driver loss is not counted. |
 | Application buffering | README examples use unbounded `Queue()` | A producer faster than its consumer grows memory outside the binding. A bounded blocking queue can deadlock callback draining if its consumer stops. |
-| Cleanup queue | Up to 32 reserved resources and four workers | Stalled jobs retain their native resources and clients; all four stalled workers prevent further progress. |
+| In-process cleanup queue | Up to 32 reserved resources and four workers | Stalled jobs retain their native resources and clients; all four stalled workers prevent further progress. |
 | CPU/GIL | Per-message Python attachment, copies, callback calls, error hooks | Floods, slow callbacks, or repeated exceptions consume CPU and delay unrelated Python work; no backpressure, batch API, or real-time deadline. |
-| Threads/stack | Four global cleanup workers; ALSA input reader per input connection; OS-managed backend callback work | OS thread quotas or memory limits can stop import/open. ALSA failure restoration is specifically broken as described in B1. |
-| File descriptors/handles | ALSA sequencer and stop-pipe descriptors; WinMM handles; native endpoints and queues | OS/user quotas can reject setup or trigger upstream panic/rollback defects. |
+| Threads/stack | Four cleanup workers per interpreter; two communication threads per isolated client, a parent dispatch thread and child forwarding thread per isolated input; ALSA input reader per input connection; OS-managed backend callback work | OS thread quotas or memory limits can stop import/open. ALSA failure restoration is specifically broken as described in B1. |
+| Child processes | One interpreter per isolated client, no global client quota | Startup memory, process quotas, and scheduling overhead can limit client count. |
+| File descriptors/handles | Two stdio pipes per worker; ALSA sequencer and stop-pipe descriptors; WinMM handles; native endpoints and queues | OS/user quotas can reject setup or trigger upstream panic/rollback defects. |
 | Native clients/ports | CoreMIDI retained clients, ALSA queues/ports, virtual endpoints | Churn can consume native quotas and generate topology work in other applications. |
 | Disk | Installation/build artifacts and caches; no recording or MIDI data files in normal binding operation | Full disk mainly affects installation/builds or application/error-hook logging, rather than the MIDI byte path. |
 | Network | No binding-owned sockets or network protocol | OS network-MIDI endpoints and user callbacks may depend on network transport; packet loss or peer failure remains subject to D1. |
@@ -336,7 +352,8 @@ though the context manager closes correctly.
 Messages retained by application code remain valid because the bridge copies
 them into owned bytes. That safety property also means retention costs real
 memory. There is no input message-size limit, throughput admission control,
-overflow counter, or byte-based memory budget exposed by the binding. An
+or byte-based memory budget. Isolated queue overflow is counted, but unfinished
+native SysEx grows before it reaches those queues. An
 unfinished native SysEx buffer can retain its allocated capacity after it is
 cleared.
 
@@ -411,8 +428,9 @@ Return values are ignored. Passing an `async def` or generator function can
 return an unawaited coroutine or uniterated generator instead of processing
 messages. An async function remains callable, so opening does not reject it.
 
-Callbacks execute on native delivery threads, with Python attached, not on the
-main thread or an asyncio event loop. GUI/main-thread APIs and application state
+Callbacks execute on parent dispatch threads by default, or native delivery
+threads in-process, rather than the main thread or an asyncio event loop.
+GUI/main-thread APIs and application state
 need their own thread handoff. Exceptions, including callback-raised exit or
 interrupt exceptions, do not provide a reliable way to stop the controlling
 thread. A slow error hook is part of callback duration and drain time.
@@ -426,12 +444,11 @@ fail during interpreter shutdown through `try_attach`, skipping Python delivery.
 
 ### A4. Documentation and supported-platform boundaries
 
-**Validation gaps.** The unqualified failed-open restoration promise needs the
-B1 caveat for returned upstream errors. Caught panics now permanently disable
-affected client/connection ownership, as documented in the README. Claims about
-exception detail should distinguish human-readable strings from preserved
-native error kinds. Cross-platform SysEx framing and
-the process-lifetime CoreMIDI client policy deserve prominent usage guidance.
+**Validation gaps.** Default native failures invalidate the worker. In-process
+failed-open rollback still has the B1 caveat. Caught panics permanently disable
+affected native ownership. Native exception detail remains a human-readable
+string rather than a structured error kind. Cross-platform SysEx framing
+remains a validation gap.
 The stub describes handles as unhashable but does not explicitly declare a
 `__hash__ = None` surface; static-tool behavior should be checked before calling
 this a type-checker defect.
@@ -463,10 +480,9 @@ software endpoints or hardware; ordinary CI should not probe arbitrary devices.
 4. Run authorized unplug/replug, device/driver restart, long SysEx, overload,
    and long-duration timestamp tests on each backend. Record message loss,
    cleanup time, surviving resources, exceptions, and identity changes.
-5. Decide the required service guarantees: best-effort in-process binding or
-   bounded recovery with process isolation. Timeout/cancellation, health events,
-   buffering, framing, and structured error changes are API/design decisions,
-   not automatic additions to this small wrapper.
+5. Validate the new default process boundary on each native backend under faults.
+   Health events, byte budgets, framing, and structured error changes remain
+   separate API decisions; process isolation does not establish device health.
 6. Update user guidance for client retention, asynchronous destruction,
    callback constraints, SysEx framing, API differences, and the limits of
    failed-open restoration after resolving or explicitly accepting those risks.
