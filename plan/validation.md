@@ -1,0 +1,116 @@
+# Validation and release record
+
+## Scope
+
+Slices 7 and 8 add native check fixtures, CI, distribution checks, and usage
+documentation. Build artifacts remain candidates for validation. Publication
+and a release tag are separate decisions.
+
+Additional work beyond the prompt
+
+None.
+
+## Local evidence, 2026-10-08
+
+Host: macOS 14.5 (23F79), arm64; Rust 1.87; midir 0.11.0;
+PyO3 0.29.3; maturin 1.15.0; uv 0.10.12.
+
+| Interpreter | Binding unit checks | Native-thread lifecycle checks |
+| --- | --- | --- |
+| CPython 3.11.7 | 34 passed | 19 passed plus 2 isolated finalization checks |
+| CPython 3.12.3 | 34 passed | Included in the Python runner |
+| CPython 3.13.5 | 34 passed | Included in the Python runner |
+| CPython 3.14.6 | 34 passed | Included in the Python runner |
+
+The larger matrix exposed a test synchronization race: the native-thread stop
+signal precedes client restoration. The test now waits for the connection lock
+to confirm completed automatic cleanup before asserting client reuse. Production
+behavior did not change.
+
+Ruff, formatting, ty, pyupgrade, Cargo formatting, Clippy with warnings denied,
+and the scoped diff check pass. Native MIDI client constructors, discovery,
+connections, virtual endpoints, and hardware traffic have not been run locally.
+The CoreMIDI loopback request awaits explicit owner authorization.
+
+## CI and artifacts
+
+The [CI workflow](../.github/workflows/ci.yml) has 16 combinations: CPython
+3.11–3.14 on Ubuntu 24.04 x86_64, macOS 14 arm64, macOS 15 Intel, and
+Windows 2022 x86_64. It checks Rust and Python, builds interpreter-specific
+wheels from an sdist, and installs/tests each wheel in a fresh environment
+outside the checkout. Actions are pinned to verified commit hashes.
+
+Linux wheels target manylinux_2_28. maturin audits and repairs the wheel;
+distribution checks require bundled libasound and its matching source RPM in
+the download artifact. The third-party notices include the LGPL license and
+describe replacement of the bundled shared library. macOS wheels use separate
+architectures and system CoreMIDI frameworks. Windows wheels use WinMM.
+Actual tags, native dependency inspection, and CI results must be recorded
+before advertising the resulting artifacts as verified.
+
+Opt-in archive checks:
+
+```sh
+uv run pytest test/release/artifacts.py -v
+```
+
+These verify Cargo/Python version agreement, absence of Python runtime
+dependencies, native module placement, unchanged stubs, the typing marker,
+third-party notices, and sdist source completeness. The sdist-to-wheel build
+also checks that the archive can compile independently of the checkout.
+
+## Native backend checks
+
+`test/manual/loopback.py` explicitly selects unique temporary software endpoints
+by name and never opens an enumerated hardware device. It covers both virtual
+directions, all eight filter masks and the default, exact note/CC/realtime/SysEx
+bytes, timestamp type and monotonic ordering, duplicate names and distinct IDs,
+missing/stale lookup, client reuse, context exceptions, and interpreter exit
+with queued traffic. The shutdown case runs in a subprocess with a deadline.
+
+`test/manual/windows.py` checks unsupported virtual creation and preserved client
+state without connecting hardware. It still initializes the native backend and
+must be explicitly selected. Windows I/O requires a separately authorized,
+explicitly chosen physical port or installed loopback driver.
+
+| Backend | Recorded native I/O result |
+| --- | --- |
+| CoreMIDI | Pending explicit authorization for this Mac |
+| ALSA | Not run; requires a host with sequencer access |
+| WinMM | Not run; requires a selected device/driver for I/O |
+
+The CI `workflow_dispatch` input `coremidi` opts into macOS arm64 virtual tests.
+Default push and PR checks do not initialize a MIDI client. These checks do not
+cover unplug/replug, driver failure, hardware timing, or a universal throughput
+bound. Representative throughput/latency and larger SysEx measurements remain
+native validation work; do not infer them from unit tests.
+
+## Upstream close/drop review
+
+Reviewed the pinned midir 0.11.0 backend sources, rather than assuming that
+the three implementations have identical shutdown behavior:
+
+- CoreMIDI input close takes the handler-data mutex and extracts its client/data;
+  native port objects are disposed as the connection is consumed. The Python
+  bridge retires and drains delivery before that native close.
+- ALSA input close signals its pipe and joins the input thread before
+  unsubscribing, freeing its timestamp queue, and deleting the port. Drop also
+  uses this close path. It must not run on its input callback thread.
+- WinMM input close takes its native handle lock, resets/stops input, unprepares
+  and releases SysEx buffers, then closes the handle. Reset can invoke callbacks;
+  the retired bridge refuses Python delivery during teardown. Output close/drop
+  uses the backend's native handle cleanup.
+
+The production cleanup worker and GIL release address these ownership and
+callback constraints. Source review does not prove driver shutdown safety.
+
+## Release gates
+
+- Public API, stubs, byte ownership, exceptions, state restoration, concurrent
+  close, GC, and finalization have device-free coverage.
+- Package name `midirp`: PyPI JSON endpoint returned HTTP 404 on 2026-10-08.
+  This is a point-in-time check, not a reservation or guarantee of availability.
+- Project license: owner choice pending. Third-party licenses do not license
+  this project's code. Do not publish until the choice and metadata are resolved.
+- Cross-platform artifact validation and native I/O results remain separate gates.
+- No publication credentials, publish workflow, release, or tag were added.

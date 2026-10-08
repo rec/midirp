@@ -1,128 +1,207 @@
-# Python bindings for the midir Rust MIDI library
+# midirp
 
-This project is being implemented according to [plan/plan.md](plan/plan.md).
-It targets standard, GIL-enabled CPython 3.11 and later. Native MIDI operation
-on each platform will be validated separately before claiming support.
+Typed Python bindings for [midir](https://github.com/Boddlnagg/midir), with raw
+MIDI bytes, native timestamps, and explicit connection ownership. Import the
+API from `midirp.midi`. There are no Python runtime dependencies.
 
-## Development
+The build matrix exercises standard, GIL-enabled CPython 3.11–3.14 on macOS
+arm64/x86_64, Linux x86_64 (ALSA), and Windows x86_64 (WinMM). Build and unit
+checks do not establish native MIDI support. See [validation](plan/validation.md)
+for recorded results and outstanding native checks. Free-threaded Python,
+subinterpreters, PyPy, musl, and other architectures are outside this matrix.
 
-The build uses midir 0.11.0, PyO3 0.29.3, maturin 1.15.0, and Rust 1.87 or
-later. Cargo owns the package version; maturin uses it for Python metadata.
-Python runtime dependencies are empty.
+## Installation and building
+
+The package has not been published. Build locally:
 
 ```sh
-uv sync
-uv run pytest
-uv run maturin build --release --out dist
+uv sync --frozen
+uv run maturin build --release --locked --sdist --out dist
 ```
 
-The canonical native module is `midirp.midi`. Importing it does not initialize
-the MIDI backend. The package includes type stubs and a `py.typed` marker.
+`--sdist` builds the wheel from the source archive, checking its completeness.
+Install a CI or locally built wheel with `uv pip install /path/to/midirp.whl`
+using an interpreter matching its CPython version and architecture. A wheel
+installation needs no Rust compiler. Source builds require Rust 1.87 or later,
+a C linker, and a supported Python interpreter. macOS requires Xcode Command
+Line Tools; Windows requires Visual Studio C++ build tools and the MSVC Rust
+target. Linux also requires `pkg-config` and ALSA development headers
+(`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora).
 
-Native unit tests link to Python without the extension-module build setting:
+Linux MIDI operations require a working ALSA sequencer, normally `/dev/snd/seq`,
+and permission to access it. Containers need the device passed through.
+Installing headers or importing a wheel does not provide a MIDI device.
+Standard wheels use the ALSA backend and no optional midir features.
+
+Cargo owns version `0.1.0`. The pinned build uses midir 0.11.0, PyO3 0.29.3,
+and maturin 1.15.0. Wheels are interpreter-specific rather than abi3.
+
+## Discover and select a port
+
+```python
+from midirp import midi
+
+output = midi.MidiOutput("my application")
+for port in output.ports():
+    print(port.id(), output.port_name(port))
+```
+
+Choose a port's ID deliberately, then use `find_port_by_id(id)`. A missing ID
+returns `None`; an empty port list is valid. Names need not be unique. Handles
+support equality and are unhashable. IDs are opaque backend identifiers; there
+is no extra persistence guarantee across disconnection or reboot. Input and
+output handles are different types. Discovery can race with unplugging.
+
+```python
+from midirp import midi
+
+def play_note(port_id: str) -> None:
+    output = midi.MidiOutput("note example")
+    port = output.find_port_by_id(port_id)
+    if port is None:
+        raise LookupError(f"MIDI output is absent: {port_id}")
+    with output.connect(port, "note connection") as connection:
+        connection.send(b"\x90\x3c\x7f")
+        connection.send(b"\x80\x3c\x00")
+```
+
+`send()` accepts immutable `bytes` only. Convert mutable buffers explicitly.
+Bytes are forwarded unchanged; midir handles message validity. A native send
+error leaves the connection open. Concurrent sends and close share a native
+lock, with the GIL released; close waits for a send already in progress.
+
+## Receive messages
+
+```python
+from queue import Queue
+from midirp import midi
+
+def receive_one(port_id: str) -> tuple[int, bytes]:
+    messages: Queue[tuple[int, bytes]] = Queue()
+
+    def receive(timestamp: int, message: bytes) -> None:
+        messages.put((timestamp, message))
+
+    source = midi.MidiInput("input example")
+    source.ignore(midi.Ignore.TIME | midi.Ignore.ACTIVE_SENSE)
+    port = source.find_port_by_id(port_id)
+    if port is None:
+        raise LookupError(f"MIDI input is absent: {port_id}")
+    with source.connect(port, "input connection", receive):
+        return messages.get(timeout=5)
+```
+
+The callback receives `(timestamp: int, message: bytes)` directly on the native
+MIDI callback thread. Owned bytes remain valid after the callback returns.
+Timestamps preserve midir's microsecond values and backend origin; do not compare
+unrelated connections' clocks. Return values are ignored. Exceptions are reported
+to `sys.unraisablehook` with the callable as context; later messages still arrive.
+
+Keep callbacks short. The GIL, OS scheduling, and backend buffers prevent hard
+real-time guarantees or a promise of no loss under load. The example uses an
+application-owned queue; the binding provides no buffering or queue API.
+A callback may send through a separate output connection. Calling any
+connection's `close()` from a MIDI callback or its error hook raises
+`RuntimeError`; signal the controlling thread to close it instead.
+
+The default filter is `Ignore.NONE`. Combine `SYSEX`, `TIME`, and `ACTIVE_SENSE`
+with `|`. `Ignore.ALL` combines these three filters; note messages still arrive.
+`Ignore(bits)` accepts integer masks 0–7; `int(flags)` returns the mask. Configure
+filters before connecting. Configuration survives failed opens and close.
+
+## Virtual ports
+
+On macOS and Linux, a virtual input receives data from other clients, while a
+virtual output sends data to other clients' inputs:
+
+```python
+from queue import Queue
+from midirp import midi
+
+def receive_virtual() -> tuple[int, bytes]:
+    messages: Queue[tuple[int, bytes]] = Queue()
+
+    def receive(timestamp: int, message: bytes) -> None:
+        messages.put((timestamp, message))
+
+    source = midi.MidiInput("virtual example")
+    with source.create_virtual("example input", receive):
+        # Another application can connect and send while this port is alive.
+        return messages.get(timeout=5)
+```
+
+Use `output.create_virtual(port_name)` for virtual output, then `send(bytes)` on
+its connection. A receiver must connect while the port is alive. Both methods
+return the usual owned connection. Windows raises `NotImplementedError` before
+changing client ownership. An external MIDI loopback driver must be installed
+and selected separately if needed.
+
+## Ownership, errors, and shutdown
+
+A connection owns its native resource and keeps its original Python client alive.
+While connecting, connected, or closing, that client rejects other operations.
+Failed opens restore the same native client. `close()` is synchronous and
+idempotent, restores the client for reuse, and waits for concurrent teardown.
+`closed` reports connection state. Context-manager exit closes the connection
+and propagates body exceptions. Handles cannot be constructed directly.
+
+| Failure | Exception |
+| --- | --- |
+| Backend initialization | `InitError` |
+| Port metadata | `PortInfoError` |
+| Connect or virtual creation | `ConnectError` |
+| Sending | `SendError` |
+| Wrong argument type/direction | `TypeError` |
+| Unknown filter bits | `ValueError` |
+| Unavailable client, closed connection, callback-thread close | `RuntimeError` |
+| Virtual ports on Windows | `NotImplementedError` |
+
+The four native errors inherit from `MidiError` and retain upstream detail.
+There is no automatic retry, reconnection, or promise of immediate unplug
+detection. Handle device failures in the application.
+
+Import starts one native cleanup worker for the main interpreter, without
+initializing a MIDI backend. The worker only tears down resources; callbacks
+remain on midir's thread. Destruction and cyclic GC disable delivery immediately
+and queue teardown without blocking Python. Client restoration is asynchronous
+in that case; use explicit close when reuse must be immediate. Callback references
+are visible to Python's collector.
+
+An `atexit` handler rejects new registrations, disables delivery, drains active
+callbacks and live resources with the GIL released, and joins the cleanup worker
+before finalization. A callback that never returns can prevent clean shutdown.
+Forced termination bypassing `atexit` does not run Python cleanup.
+Subinterpreters are rejected. Starting a fresh interpreter is required for a
+child process; forking with the worker or live MIDI resources is unsupported.
+
+## Development and native validation
 
 ```sh
-PYO3_PYTHON="$PWD/.venv/bin/python" cargo test
-PYO3_PYTHON="$PWD/.venv/bin/python" cargo clippy --all-targets -- -D warnings
+uv run --frozen pytest
+uv run --frozen ruff check --select B,E,F,I python test
+uv run --frozen ruff format --check python test
+uv run --frozen ty check python/midirp test
 cargo fmt --check
+PYO3_PYTHON="$PWD/.venv/bin/python" cargo clippy --locked --all-targets -- -D warnings
+PYO3_PYTHON="$PWD/.venv/bin/python" cargo test --locked
 ```
 
-maturin selects the extension-module build setting for wheel builds.
-Linux source builds also require ALSA development libraries and `pkg-config`.
-No MIDI clients or devices are opened by the unit tests.
+On Windows use `.venv/Scripts/python.exe` for `PYO3_PYTHON`. maturin chooses the
+extension settings for wheels; Rust tests link Python explicitly. Unit tests
+open no MIDI clients or devices and include deadline-bounded native-thread and
+interpreter-finalization checks. Typing ships as `midi.pyi` and `py.typed`.
 
-## Current implementation
+Native checks are opt-in and create temporary software endpoints:
 
-The first six slices provide the planned MIDI API and callback lifecycle:
+```sh
+uv run pytest test/manual/loopback.py -v
+# Windows unsupported-virtual-path checks, without hardware connections:
+uv run pytest test/manual/windows.py -v
+```
 
-- Input and output clients can enumerate ports, retrieve their names, and find
-  ports with `find_port_by_id(id)`, returning `None` when absent.
-- Port handles provide `id()` and equality using the upstream handle. Input and
-  output handles are distinct and remain unhashable. IDs are opaque backend
-  identifiers; no extra persistence guarantee across unplugging or reboot is
-  added. Ports remain independent of their discovering client's connection state.
-- An output client can connect to a discovered output port. The connection owns
-  the native resource and keeps the original Python client alive.
-- While connecting, connected, or closing, the client rejects other operations
-  with `RuntimeError`. Failed connection attempts restore the same native client.
-- `close()` restores the original client for reuse and is idempotent. Concurrent
-  close calls wait for teardown to finish. Output connections support context
-  managers. Input connections have the same close and context-manager contract.
-- Native failures use `MidiError` subclasses: `InitError`, `PortInfoError`,
-  `ConnectError`, and `SendError`. Invalid Python argument types raise `TypeError`.
-
-Output connections provide `send(message: bytes)`. Bytes are passed unchanged to
-midir, which handles MIDI message validity. Other containers, including
-`bytearray` and `memoryview`, raise `TypeError`; convert them explicitly to
-`bytes`. Native failures raise `SendError` with upstream detail and leave the
-connection open. Sending on a closed connection raises `RuntimeError`.
-Concurrent sends and close share the native resource lock with the GIL released;
-close waits for an already-running send. An input callback may send through a
-separate output connection.
-
-Input clients provide `ignore(flags: Ignore)`. The default is `Ignore.NONE`.
-Combine `Ignore.SYSEX`, `Ignore.TIME`, and `Ignore.ACTIVE_SENSE` with `|`;
-`Ignore.ALL` combines those three filters, so other MIDI messages still arrive.
-`Ignore(bits)` accepts integer masks from 0 through 7; unknown bits raise
-`ValueError`, and `int(flags)` returns the mask. Set filters before connecting;
-changing them while the client is unavailable raises `RuntimeError`. Filter
-configuration survives failed connection attempts and close.
-
-On macOS and Linux, `MidiInput.create_virtual(port_name, callback)` creates an
-input that receives messages sent by other applications. Likewise,
-`MidiOutput.create_virtual(port_name)` creates an output that sends messages to
-applications connected to it. Both return the usual owned connection with the
-same close, context-manager, GC, and shutdown behavior. A failed creation restores
-the original client and raises `ConnectError`. On Windows both methods raise
-`NotImplementedError` before changing native client state. Virtual input validates
-its callable before consuming native ownership on supported platforms.
-
-Port and connection handles cannot be constructed directly. Context-manager exit
-closes the connection and propagates body errors.
-
-Ownership transitions are tested without MIDI devices. Native discovery,
-lookup, sending, filtering, virtual creation, connection, and destruction against
-actual OS backends have not been exercised.
-The build and installed wheel have been verified on macOS arm64 with CPython
-3.11. Broader interpreter and platform validation remains later work.
-
-Input clients now support `connect(port, port_name, callback)`. The callback
-receives `(timestamp: int, message: bytes)` directly on the native MIDI callback
-thread. Bytes are copied, timestamps are unchanged, and return values are ignored.
-Exceptions go to `sys.unraisablehook` with the callable as context; subsequent
-messages still arrive. Keep callbacks short; Python scheduling does not provide
-hard real-time guarantees. Calling any connection's `close()` from a MIDI
-callback or its error hook raises `RuntimeError`; signal the controlling thread
-to close it instead.
-
-Each main interpreter has one documented native cleanup worker, created when the
-extension is imported, and a registry of weak native-resource references. The
-worker does not deliver callbacks. Ordinary destruction and cyclic collection
-disable delivery immediately and queue teardown without blocking Python or
-joining the callback's own thread. Client reuse after automatic destruction must
-wait for cleanup to finish; use explicit `close()` for synchronous restoration.
-The connection's single callable reference is visible to Python's collector;
-native closures do not duplicate that Python ownership.
-
-An `atexit` handler stops registration, disables all input delivery, drains active
-callbacks and connections with the GIL released, and joins the cleanup worker
-before interpreter finalization. Subinterpreters are explicitly rejected.
-Normal interpreter exit is covered; process termination that bypasses `atexit`
-does not run Python cleanup. The native-thread unit driver exercises this same
-bridge and resource lifecycle without opening MIDI devices. Tests include
-callback-thread destruction, cycles, concurrent close, pending opens, and actual
-CPython finalization in separate processes with deadlines. These tests do not
-establish platform backend or physical-device shutdown safety.
-
-Slice 5 unit checks cover strict immutable-byte arguments, unchanged forwarding,
-native send-error translation, continued use after failure, closed-state errors,
-send/close concurrency, and sending from a native input callback. The private
-output driver records calls through the production byte boundary and ownership
-core; it does not create or simulate an OS MIDI backend. Port identity and lookup
-use midir directly and await native-backend validation.
-
-Slice 6 checks cover all eight filter masks, combinations, unknown-bit and wrong-
-type rejection, and preservation of configured filters through the ownership
-transitions. Normal and virtual connections share their allocation, registration,
-and native-open path. Virtual loopback and Windows unsupported-path runtime checks
-remain part of slice 7; successful compilation is not native MIDI validation.
+Run these only with permission on the target host. CI's manual `coremidi` option
+enables the virtual-port checks on macOS arm64. Linux needs a sequencer device;
+Windows I/O needs an explicitly chosen external port. See the
+[implementation plan](plan/plan.md), [validation record](plan/validation.md), and
+[third-party notices](THIRD_PARTY_NOTICES.md). Publication requires a separate
+decision after license and native validation gates are resolved.
