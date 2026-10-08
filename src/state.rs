@@ -627,6 +627,35 @@ mod tests {
     }
 
     #[test]
+    fn an_open_snapshot_does_not_reserve_the_connection_against_another_closer() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Client::new(37);
+            let connection = Connection::new();
+            client.connect(&connection, Ok).unwrap();
+            assert!(!connection.closed());
+            py.detach(|| {
+                thread::scope(|scope| {
+                    scope
+                        .spawn(|| connection.close(&client, |native| native))
+                        .join()
+                        .unwrap()
+                })
+            })
+            .unwrap();
+            let error = connection
+                .send(&client, py, &PyBytes::new(py, &[0xf8]), |_, _| {
+                    panic!("a stale snapshot must not allow native send after close")
+                })
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyRuntimeError>(py));
+            assert_eq!(error.value(py).to_string(), "MIDI connection is closed");
+            assert!(connection.closed());
+            assert_eq!(client.with_available(|native| Ok(*native)).unwrap(), 37);
+        });
+    }
+
+    #[test]
     fn close_waits_for_a_send_in_progress_while_python_is_released() {
         Python::initialize();
         Python::attach(|py| {

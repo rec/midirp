@@ -63,25 +63,6 @@ Guaranteed native-operation or shutdown deadlines would require process
 isolation and remain outside this implementation. L issues are handled
 sequentially, with focused device-free checks and separate commits.
 
-### L5. Races are serialized, but callers still need ownership discipline
-
-**API limitation.** A port can disappear between discovery, naming, and connect.
-The `closed` property and context-manager entry only observe a momentary state;
-another thread can close immediately afterward. Concurrent sends are serialized
-without an application ordering guarantee. A send already holding the lock
-finishes before close can take it. Starting close does not cancel that send.
-
-Input retirement prevents new accepted delivery and rechecks the gate after
-waiting for Python, but an already executing callback may continue until close
-drains it. Native callbacks can start while connect is still opening, before
-the caller receives its connection. A callback cannot assume that the variable
-receiving the result of `connect()` has been assigned yet.
-
-The existing opening lock, callback gate, GIL release before native locks, GC
-traversal, and decref outside the callback mutex address real races. Their
-presence should not be confused with a proof of safety against arbitrary
-application waits or faulty drivers.
-
 ### L6. Interpreter shutdown and process lifecycle have additional constraints
 
 **API limitation and possible hangs.** Cleanup runs through Python `atexit`.

@@ -332,6 +332,40 @@ mod tests {
     }
 
     #[test]
+    fn callback_can_receive_before_native_connect_returns() {
+        let _test = TEST_LOCK.lock().unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let recorder = fixtures(py).getattr("Recorder").unwrap().call0().unwrap();
+            let callback = Arc::new(Callback::new(py, recorder.clone().unbind()).unwrap());
+            let resource = Managed::new(
+                Arc::new(Client::new(())),
+                Some(Arc::clone(&callback)),
+                |()| (),
+            );
+            py.detach(|| {
+                resource.connect(|()| {
+                    let (done, delivered) = mpsc::channel();
+                    let worker = thread::spawn(move || {
+                        callback.deliver(17, &[0x90, 60, 127]);
+                        done.send(()).unwrap();
+                    });
+                    // Delivery completes while the native open still owns control.
+                    delivered.recv_timeout(DEADLINE).unwrap();
+                    worker.join().unwrap();
+                    Ok(())
+                })
+            })
+            .unwrap();
+            resource.retire();
+            py.detach(|| resource.close()).unwrap();
+            let messages: Vec<(u64, Vec<u8>)> =
+                recorder.getattr("messages").unwrap().extract().unwrap();
+            assert_eq!(messages, vec![(17, vec![0x90, 60, 127])]);
+        });
+    }
+
+    #[test]
     fn native_delivery_preserves_owned_bytes_timestamps_and_order() {
         let _test = TEST_LOCK.lock().unwrap();
         Python::initialize();

@@ -51,6 +51,9 @@ returns `None`; an empty port list is valid. Names need not be unique. Handles
 support equality and are unhashable. IDs are opaque backend identifiers; there
 is no extra persistence guarantee across disconnection or reboot. Input and
 output handles are different types. Discovery can race with unplugging.
+Finding a port or reading its name does not reserve it: either metadata lookup
+or a later connect can fail if the device disappears. Handle errors from the
+operation itself; another presence check cannot prevent this race.
 
 ```python
 from midirp import midi
@@ -69,6 +72,9 @@ def play_note(port_id: str) -> None:
 Bytes are forwarded unchanged; midir handles message validity. A native send
 error leaves the connection open. Concurrent sends and close share a native
 lock, with the GIL released; close waits for a send already in progress.
+Competing threads have no guaranteed send order or priority over close.
+Starting close does not cancel an active send. Use one controlling thread for
+sending and closing when message order matters.
 
 ## Receive messages
 
@@ -96,6 +102,17 @@ MIDI callback thread. Owned bytes remain valid after the callback returns.
 Timestamps preserve midir's microsecond values and backend origin; do not compare
 unrelated connections' clocks. Return values are ignored. Exceptions are reported
 to `sys.unraisablehook` with the callable as context; later messages still arrive.
+
+Initialize all state used by the callback before calling `connect()` or
+`create_virtual()`. Delivery may start during native opening, before the call
+returns and its result is assigned. The callback must not depend on the variable
+receiving that connection. The queue examples initialize their callback state
+before opening and hand messages to the controlling thread.
+
+Explicit close stops accepting deliveries, rechecks delivery eligibility after
+waiting for Python, and waits for already admitted deliveries to finish. An
+already executing callback can continue while close waits; after close returns
+successfully, no callbacks remain active or will be accepted for that connection.
 
 Keep callbacks short. The GIL, OS scheduling, and backend buffers prevent hard
 real-time guarantees or a promise of no loss under load. The example uses an
@@ -156,6 +173,12 @@ idempotent, restores the client for reuse, and waits for concurrent teardown.
 teardown and becomes true after client restoration; it does not report device
 health. Context-manager exit closes the connection
 and propagates body exceptions. Handles cannot be constructed directly.
+
+Reading `closed` or entering a context manager does not reserve the connection
+against another thread closing it immediately afterward. Call `send()` directly
+and handle its exception rather than checking `closed` first as a precondition.
+For a shared connection, coordinate its lifetime through the controlling thread;
+a context manager does not prevent another owner from closing it.
 
 | Failure | Exception |
 | --- | --- |
