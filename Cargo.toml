@@ -1,0 +1,16 @@
+[package]
+name = "midirp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "Python bindings for the midir Rust MIDI library"
+repository = "https://github.com/rec/midirp"
+publish = false
+
+[lib]
+name = "midi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+midir = "=0.11.0"
+pyo3 = "=0.29.3"

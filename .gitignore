@@ -1,0 +1,8 @@
+/.venv/
+/target/
+/dist/
+__pycache__/
+/.pytest_cache/
+/.ruff_cache/
+/python/midirp/*.so
+/python/midirp/*.pyd
