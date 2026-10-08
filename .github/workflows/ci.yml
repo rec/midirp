@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      coremidi:
+        description: Run software-only CoreMIDI virtual-port checks
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, macos-15-intel, windows-2022]
+        python: ['3.11', '3.12', '3.13', '3.14']
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_HOME: ${{ github.workspace }}/target/cargo-home
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.10.12'
+      - name: Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.87.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.87.0
+      - run: uv sync --frozen --python '${{ matrix.python }}'
+      - name: Rust checks and linked tests
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            export PYO3_PYTHON="$GITHUB_WORKSPACE/.venv/Scripts/python.exe"
+          else
+            export PYO3_PYTHON="$GITHUB_WORKSPACE/.venv/bin/python"
+          fi
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - run: uv run --frozen pytest
+      - run: uv run --frozen ruff check --select B,E,F,I python test
+      - run: uv run --frozen ruff format --check python test
+      - run: uv run --frozen ty check python/midirp test
+      - name: CoreMIDI virtual ports
+        if: github.event_name == 'workflow_dispatch' && inputs.coremidi && matrix.os == 'macos-14' && matrix.python == '3.11'
+        run: uv run --frozen pytest test/manual/loopback.py -v
+      - name: Build wheel from sdist
+        uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
+        with:
+          maturin-version: 'v1.15.0'
+          rust-toolchain: '1.87.0'
+          command: build
+          args: --release --locked --sdist -i ${{ runner.os == 'Linux' && format('python{0}', matrix.python) || 'python' }} --out dist
+          manylinux: '2_28'
+          before-script-linux: dnf install -y alsa-lib-devel
+      - name: Install and test wheel outside checkout
+        run: |
+          uv venv "$RUNNER_TEMP/midirp-wheel" --python '${{ matrix.python }}'
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            wheel_python="$RUNNER_TEMP/midirp-wheel/Scripts/python.exe"
+          else
+            wheel_python="$RUNNER_TEMP/midirp-wheel/bin/python"
+          fi
+          uv pip install --python "$wheel_python" dist/*.whl pytest
+          cd "$RUNNER_TEMP"
+          "$wheel_python" -m pytest "$GITHUB_WORKSPACE/test/test_contract.py" "$GITHUB_WORKSPACE/test/test_ignore.py"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: midirp-${{ matrix.os }}-cp${{ matrix.python }}
+          path: dist/*

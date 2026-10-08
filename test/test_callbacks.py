@@ -14,6 +14,20 @@ def test_native_callback_lifecycle_completes_without_deadlock() -> None:
         "PYO3_PYTHON": sys.executable,
         "CARGO_HOME": str(project / "target" / "cargo-home"),
     }
+    for n in (
+        "HOME",
+        "USERPROFILE",
+        "RUSTUP_HOME",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "CARGO_TARGET_DIR",
+    ):
+        if (v := os.environ.get(n)) is not None:
+            environment[n] = v
     build = subprocess.run(
         ["cargo", "test", "--lib", "--no-run", "--message-format=json"],
         cwd=project,
