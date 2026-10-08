@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::callback::{check_blocking_thread, Callback};
-use crate::errors::{InitError, PortInfoError};
+use crate::errors::{native_call, InitError, PortInfoError};
 use crate::ignore::Ignore;
 use crate::lifecycle::{self, Managed, Resource};
 use crate::state::Client;
@@ -28,17 +28,17 @@ impl MidiInputPort {
     /// The backend's opaque identifier; no additional persistence guarantee.
     fn id(&self, py: Python<'_>) -> PyResult<String> {
         check_blocking_thread()?;
-        Ok(py.detach(|| self.native.id()))
+        py.detach(|| native_call("port ID", || self.native.id()))
     }
 
     fn __eq__(&self, py: Python<'_>, other: &Self) -> PyResult<bool> {
         check_blocking_thread()?;
-        Ok(py.detach(|| self.native == other.native))
+        py.detach(|| native_call("port comparison", || self.native == other.native))
     }
 
     fn __ne__(&self, py: Python<'_>, other: &Self) -> PyResult<bool> {
         check_blocking_thread()?;
-        Ok(py.detach(|| self.native != other.native))
+        py.detach(|| native_call("port comparison", || self.native != other.native))
     }
 
     #[classattr]
@@ -51,7 +51,7 @@ impl MidiInput {
     fn new(py: Python<'_>, client_name: &str) -> PyResult<Self> {
         check_blocking_thread()?;
         let native = py
-            .detach(|| midir::MidiInput::new(client_name))
+            .detach(|| native_call("create input", || midir::MidiInput::new(client_name)))?
             .map_err(|error| InitError::new_err(format!("create input: {error}")))?;
         Ok(Self {
             state: Arc::new(Client::new(native)),
@@ -156,8 +156,7 @@ impl MidiInputConnection {
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         check_blocking_thread()?;
         self.resource.retire();
-        py.detach(|| self.resource.close());
-        Ok(())
+        py.detach(|| self.resource.close())
     }
 
     #[getter]
@@ -166,6 +165,7 @@ impl MidiInputConnection {
     }
 
     fn __enter__(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<Self>> {
+        slf.get().resource.native.check_failed()?;
         if slf.get().closed(py) {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "MIDI connection is closed",

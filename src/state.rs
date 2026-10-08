@@ -7,23 +7,26 @@ use pyo3::types::{PyBytes, PyBytesMethods};
 use pyo3::{Bound, PyResult, Python};
 
 use crate::callback::check_blocking_thread;
-use crate::errors::{ConnectError, SendError};
+use crate::errors::{failed_error, native_call, report_failure, ConnectError, SendError};
 
 /// Owns a client except while a connection owns its native resource.
 pub struct Client<T> {
     state: Mutex<ClientState<T>>,
+    failed: AtomicBool,
 }
 
-/// Serializes native teardown so every close caller waits for completion.
+/// Serializes native teardown and separately publishes completed closure.
 pub struct Connection<T> {
     native: Mutex<Option<T>>,
     closed: AtomicBool,
+    failed: AtomicBool,
 }
 
 impl<T> Client<T> {
     pub fn new(native: T) -> Self {
         Self {
             state: Mutex::new(ClientState::Available(native)),
+            failed: AtomicBool::new(false),
         }
     }
 
@@ -31,7 +34,15 @@ impl<T> Client<T> {
         check_blocking_thread()?;
         let mut state = self.try_state()?;
         match &mut *state {
-            ClientState::Available(native) => operation(native),
+            ClientState::Available(native) => {
+                match native_call("client operation", || operation(native)) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.failed.store(true, Ordering::Release);
+                        Err(error)
+                    }
+                }
+            }
             _ => Err(PyRuntimeError::new_err(
                 "MIDI client is unavailable while connecting, connected, or closing",
             )),
@@ -57,34 +68,58 @@ impl<T> Client<T> {
             };
             native
         };
-
-        // Native connect may block. Do not hold the client lock across it.
-        match operation(native) {
-            Ok(native) => {
+        match native_call("connect", || operation(native)) {
+            Ok(Ok(native)) => {
                 {
-                    let mut handle = connection.native.lock().expect("connection lock poisoned");
+                    let mut handle = connection.lock_native(self)?;
                     *handle = Some(native);
                     connection.closed.store(false, Ordering::Release);
                 }
-                *self.state.lock().expect("client state lock poisoned") = ClientState::Connected;
+                *self.lock_state()? = ClientState::Connected;
                 Ok(())
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 let message = format!("connect: {error}");
-                *self.state.lock().expect("client state lock poisoned") =
-                    ClientState::Available(error.into_inner());
+                *self.lock_state()? = ClientState::Available(error.into_inner());
                 Err(ConnectError::new_err(message))
+            }
+            Err(error) => {
+                connection.fail(self);
+                Err(error)
             }
         }
     }
 
     fn try_state(&self) -> PyResult<MutexGuard<'_, ClientState<T>>> {
-        match self.state.try_lock() {
-            Ok(state) => Ok(state),
-            Err(TryLockError::WouldBlock) => Err(PyRuntimeError::new_err(
-                "MIDI client is busy with another operation",
-            )),
-            Err(TryLockError::Poisoned(_)) => panic!("client state lock poisoned"),
+        self.check_failed()?;
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::WouldBlock) => {
+                return Err(PyRuntimeError::new_err(
+                    "MIDI client is busy with another operation",
+                ))
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                self.failed.store(true, Ordering::Release);
+                return Err(failed_error());
+            }
+        };
+        self.check_failed()?;
+        Ok(state)
+    }
+
+    fn lock_state(&self) -> PyResult<MutexGuard<'_, ClientState<T>>> {
+        self.state.lock().map_err(|_| {
+            self.failed.store(true, Ordering::Release);
+            failed_error()
+        })
+    }
+
+    fn check_failed(&self) -> PyResult<()> {
+        if self.failed.load(Ordering::Acquire) {
+            Err(failed_error())
+        } else {
+            Ok(())
         }
     }
 }
@@ -94,6 +129,7 @@ impl<T> Connection<T> {
         Self {
             native: Mutex::new(None),
             closed: AtomicBool::new(true),
+            failed: AtomicBool::new(false),
         }
     }
 
@@ -101,8 +137,9 @@ impl<T> Connection<T> {
         self.closed.load(Ordering::Acquire)
     }
 
-    pub fn send(
+    pub fn send<C: Send>(
         &self,
+        client: &Client<C>,
         py: Python<'_>,
         message: &Bound<'_, PyBytes>,
         operation: impl FnOnce(&mut T, &[u8]) -> Result<(), midir::SendError> + Send,
@@ -111,27 +148,75 @@ impl<T> Connection<T> {
         T: Send,
     {
         check_blocking_thread()?;
-        // PyBytes owns immutable storage for the entire detached call. Extract
-        // the slice while attached, then release the GIL before taking the lock.
         let message = message.as_bytes();
         py.detach(|| {
-            let mut native = self.native.lock().expect("connection lock poisoned");
+            self.check_failed()?;
+            client.check_failed()?;
+            let mut native = self.lock_native(client)?;
+            self.check_failed()?;
             let native = native
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("MIDI connection is closed"))?;
-            operation(native, message).map_err(|error| SendError::new_err(format!("send: {error}")))
+            match native_call("send", || operation(native, message)) {
+                Ok(result) => result.map_err(|error| SendError::new_err(format!("send: {error}"))),
+                Err(error) => {
+                    self.fail(client);
+                    Err(error)
+                }
+            }
         })
     }
 
-    pub fn close<C>(&self, client: &Client<C>, operation: impl FnOnce(T) -> C) {
-        let mut native = self.native.lock().expect("connection lock poisoned");
-        if let Some(connection) = native.take() {
-            *client.state.lock().expect("client state lock poisoned") = ClientState::Closing;
-            let restored = operation(connection);
-            *client.state.lock().expect("client state lock poisoned") =
-                ClientState::Available(restored);
-            // Publish completion only after the original client is available again.
+    pub fn close<C>(&self, client: &Client<C>, operation: impl FnOnce(T) -> C) -> PyResult<()> {
+        let mut native = self.lock_native(client)?;
+        if native.is_some() {
+            *client.lock_state().inspect_err(|_| {
+                self.fail(client);
+            })? = ClientState::Closing;
+            let connection = native.take().expect("owned connection missing");
+            match native_call("close", || operation(connection)) {
+                Ok(restored) => *client.lock_state()? = ClientState::Available(restored),
+                Err(error) => {
+                    self.fail(client);
+                    self.closed.store(true, Ordering::Release);
+                    return Err(error);
+                }
+            }
             self.closed.store(true, Ordering::Release);
+        }
+        self.check_failed()
+    }
+
+    pub fn fail<C>(&self, client: &Client<C>) {
+        self.failed.store(true, Ordering::Release);
+        client.failed.store(true, Ordering::Release);
+    }
+
+    pub fn check_failed(&self) -> PyResult<()> {
+        if self.failed.load(Ordering::Acquire) {
+            Err(failed_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn lock_native<C>(&self, client: &Client<C>) -> PyResult<MutexGuard<'_, Option<T>>> {
+        self.native.lock().map_err(|_| {
+            self.fail(client);
+            failed_error()
+        })
+    }
+}
+
+impl<T> Drop for Client<T> {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let native = mem::replace(state, ClientState::Closing);
+        if native_call("client destruction", || drop(native)).is_err() {
+            report_failure("native client destruction panicked");
         }
     }
 }
@@ -150,6 +235,109 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn panicking_connect_disables_the_client_and_a_fresh_client_still_works() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Client::new(37);
+            let connection = Connection::<i32>::new();
+            let error = client
+                .connect(&connection, |_| panic!("connect fault"))
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyRuntimeError>(py));
+            assert!(error.value(py).to_string().contains("connect fault"));
+            assert!(connection.closed());
+            assert!(client.with_available(|_| Ok(())).is_err());
+            assert!(client
+                .connect(&Connection::<i32>::new(), |_| panic!(
+                    "failed client must not reopen"
+                ))
+                .is_err());
+            assert!(connection
+                .close(&client, |_| panic!("no native handle survived"))
+                .is_err());
+            let fresh = Client::new(19);
+            let reopened = Connection::new();
+            fresh.connect(&reopened, Ok).unwrap();
+            reopened.close(&fresh, |value| value).unwrap();
+            assert_eq!(fresh.with_available(|value| Ok(*value)).unwrap(), 19);
+        });
+    }
+
+    #[test]
+    fn metadata_panic_disables_reuse_and_client_destruction_contains_native_panics() {
+        struct Native;
+        impl Drop for Native {
+            fn drop(&mut self) {
+                panic!("destruction fault");
+            }
+        }
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Client::new(Native);
+            let result: PyResult<()> = client.with_available(|_| panic!("metadata fault"));
+            assert!(result.unwrap_err().is_instance_of::<PyRuntimeError>(py));
+            assert!(client
+                .with_available::<()>(|_| panic!("failed client must not enumerate"))
+                .is_err());
+            drop(client);
+        });
+    }
+
+    #[test]
+    fn send_panic_allows_teardown_but_permanently_disables_connection_and_client() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Client::new(37);
+            let connection = Connection::new();
+            client.connect(&connection, Ok).unwrap();
+            let error = connection
+                .send(&client, py, &PyBytes::new(py, &[0xf8]), |_, _| {
+                    panic!("send fault")
+                })
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyRuntimeError>(py));
+            assert!(!connection.closed());
+            assert!(connection
+                .send(&client, py, &PyBytes::new(py, &[0xf8]), |_, _| panic!(
+                    "failed connection must not send"
+                ))
+                .is_err());
+            let mut restored = false;
+            assert!(connection
+                .close(&client, |native| {
+                    restored = true;
+                    native
+                })
+                .is_err());
+            assert!(restored);
+            assert!(connection.closed());
+            assert!(client.with_available(|_| Ok(())).is_err());
+            assert!(connection
+                .close(&client, |_| panic!("native teardown must not repeat"))
+                .is_err());
+        });
+    }
+
+    #[test]
+    fn teardown_panic_consumes_ownership_once_and_reports_failed_state() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Client::new(37);
+            let connection = Connection::new();
+            client.connect(&connection, Ok).unwrap();
+            let error = connection
+                .close(&client, |_| panic!("teardown fault"))
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyRuntimeError>(py));
+            assert!(connection.closed());
+            assert!(client.with_available(|_| Ok(())).is_err());
+            assert!(connection
+                .close(&client, |_| panic!("native teardown must not repeat"))
+                .is_err());
+        });
+    }
 
     #[test]
     fn failed_connect_restores_the_same_client() {
@@ -192,11 +380,15 @@ mod tests {
         assert!(client.with_available(|_| Ok(())).is_err());
         assert!(client.connect(&Connection::new(), Ok).is_err());
 
-        connection.close(&client, |native| {
-            assert!(client.with_available(|_| Ok(())).is_err());
-            native
-        });
-        connection.close(&client, |_| panic!("close must be idempotent"));
+        connection
+            .close(&client, |native| {
+                assert!(client.with_available(|_| Ok(())).is_err());
+                native
+            })
+            .unwrap();
+        connection
+            .close(&client, |_| panic!("close must be idempotent"))
+            .unwrap();
         assert!(connection.closed());
         assert_eq!(client.with_available(|native| Ok(**native)).unwrap(), 37);
 
@@ -204,7 +396,7 @@ mod tests {
         client.connect(&reopened, Ok).unwrap();
         assert!(!reopened.closed());
         assert!(connection.closed());
-        reopened.close(&client, |native| native);
+        reopened.close(&client, |native| native).unwrap();
     }
 
     #[test]
@@ -221,17 +413,21 @@ mod tests {
             let closing_connection = Arc::clone(&connection);
             let closing_client = Arc::clone(&client);
             scope.spawn(move || {
-                closing_connection.close(&closing_client, |native| {
-                    started_tx.send(()).unwrap();
-                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                    native
-                })
+                closing_connection
+                    .close(&closing_client, |native| {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        native
+                    })
+                    .unwrap()
             });
             started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             assert!(client.with_available(|_| Ok(())).is_err());
             scope.spawn(|| {
                 second_started_tx.send(()).unwrap();
-                connection.close(&client, |_| panic!("native close must run once"));
+                connection
+                    .close(&client, |_| panic!("native close must run once"))
+                    .unwrap();
                 done_tx.send(()).unwrap();
             });
             second_started_rx
@@ -304,11 +500,13 @@ mod tests {
             let client = &client;
             let connection = &connection;
             scope.spawn(move || {
-                connection.close(client, |native| {
-                    started_tx.send(()).unwrap();
-                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                    native
-                });
+                connection
+                    .close(client, |native| {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        native
+                    })
+                    .unwrap();
             });
             started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             scope.spawn(move || result_tx.send(connection.closed()).unwrap());
@@ -365,7 +563,7 @@ mod tests {
                 Ok(())
             })
             .is_err());
-        connection.close(&client, |native| native);
+        connection.close(&client, |native| native).unwrap();
         assert_eq!(client.with_available(|native| Ok(*native)).unwrap(), flags);
     }
 
@@ -378,7 +576,7 @@ mod tests {
             client.connect(&connection, Ok).unwrap();
             for bytes in [vec![], vec![0], vec![0x90, 60, 127], vec![0xf0, 0, 1, 0xf7]] {
                 connection
-                    .send(py, &PyBytes::new(py, &bytes), |native, message| {
+                    .send(&client, py, &PyBytes::new(py, &bytes), |native, message| {
                         native.push(message.to_vec());
                         Ok(())
                     })
@@ -389,19 +587,26 @@ mod tests {
                 midir::SendError::Other("driver error"),
             ] {
                 let error = connection
-                    .send(py, &PyBytes::new(py, &[0xf8]), |_, _| Err(native_error))
+                    .send(&client, py, &PyBytes::new(py, &[0xf8]), |_, _| {
+                        Err(native_error)
+                    })
                     .unwrap_err();
                 assert!(error.is_instance_of::<SendError>(py));
                 assert_eq!(error.value(py).to_string(), format!("send: {native_error}"));
                 assert!(!connection.closed());
             }
             connection
-                .send(py, &PyBytes::new(py, &[0xf8]), |native, message| {
-                    native.push(message.to_vec());
-                    Ok(())
-                })
+                .send(
+                    &client,
+                    py,
+                    &PyBytes::new(py, &[0xf8]),
+                    |native, message| {
+                        native.push(message.to_vec());
+                        Ok(())
+                    },
+                )
                 .unwrap();
-            connection.close(&client, |native| native);
+            connection.close(&client, |native| native).unwrap();
             assert_eq!(
                 client.with_available(|native| Ok(native.clone())).unwrap(),
                 vec![
@@ -413,7 +618,7 @@ mod tests {
                 ]
             );
             let error = connection
-                .send(py, &PyBytes::new(py, &[0xf8]), |_, _| {
+                .send(&client, py, &PyBytes::new(py, &[0xf8]), |_, _| {
                     panic!("closed connection must not send")
                 })
                 .unwrap_err();
@@ -440,6 +645,7 @@ mod tests {
                         Python::attach(|py| {
                             connection
                                 .send(
+                                    client,
                                     py,
                                     &PyBytes::new(py, &[0x90, 60, 127]),
                                     move |native, bytes| {
@@ -456,7 +662,7 @@ mod tests {
                     assert!(!connection.closed());
                     scope.spawn(|| {
                         closing.send(()).unwrap();
-                        connection.close(client, |native| native);
+                        connection.close(client, |native| native).unwrap();
                         done.send(()).unwrap();
                     });
                     close_started.recv_timeout(Duration::from_secs(5)).unwrap();

@@ -10,14 +10,17 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::callback::Callback;
+use crate::errors::{failed_error, native_call, report_failure};
 use crate::state::{Client, Connection};
 
 pub trait Resource: Send + Sync {
     fn retire(&self);
-    fn close(&self);
+    fn close(&self) -> PyResult<()>;
     fn reserve(&self) -> PyResult<Arc<AtomicU8>>;
     fn queue(&self) -> bool;
     fn finish(&self);
+    /// Invalidate ownership; return whether no native handle remains to retain.
+    fn fail(&self) -> bool;
 }
 
 /// Separates native client ownership from the Python client's lifetime.
@@ -53,7 +56,11 @@ impl<C, N> Managed<C, N> {
     ) -> PyResult<()> {
         crate::callback::check_blocking_thread()?;
         // Shutdown can see registration before native connect returns.
-        let closed = self.opening.lock().expect("opening lock poisoned");
+        self.native.check_failed()?;
+        let closed = self.opening.lock().map_err(|_| {
+            self.native.fail(&self.client);
+            failed_error()
+        })?;
         if *closed {
             return Err(PyRuntimeError::new_err(
                 "MIDI connection was closed before opening completed",
@@ -70,21 +77,37 @@ impl<C: Send, N: Send> Resource for Managed<C, N> {
         }
     }
 
-    fn close(&self) {
-        let mut closed = self.opening.lock().expect("opening lock poisoned");
+    fn close(&self) -> PyResult<()> {
+        // Drain before taking the opening lock so even a poisoned lifecycle
+        // cannot leave Python deliveries running into interpreter finalization.
+        if let Some(callback) = &self.callback {
+            match native_call("callback drain", || callback.drain()) {
+                Ok(Ok(())) => (),
+                Ok(Err(error)) | Err(error) => {
+                    self.native.fail(&self.client);
+                    return Err(error);
+                }
+            }
+        }
+        let mut closed = self.opening.lock().map_err(|_| {
+            self.native.fail(&self.client);
+            failed_error()
+        })?;
         if !*closed {
             *closed = true;
-            if let Some(callback) = &self.callback {
-                callback.drain();
-            }
-            self.native.close(&self.client, self.teardown);
+            let result = self.native.close(&self.client, self.teardown);
             // A queued job keeps its reservation until a worker consumes it,
             // even if an explicit close has already completed its native work.
-            let _ = self
-                .cleanup
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                    (state != QUEUED).then_some(FINISHED)
-                });
+            if self.native.closed() {
+                let _ = self
+                    .cleanup
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                        (state != QUEUED).then_some(FINISHED)
+                    });
+            }
+            result
+        } else {
+            self.native.check_failed()
         }
     }
 
@@ -110,6 +133,11 @@ impl<C: Send, N: Send> Resource for Managed<C, N> {
 
     fn finish(&self) {
         self.cleanup.store(FINISHED, Ordering::Release);
+    }
+
+    fn fail(&self) -> bool {
+        self.native.fail(&self.client);
+        self.native.closed()
     }
 }
 
@@ -173,6 +201,7 @@ impl Runtime {
                 stopping: false,
                 resources: Vec::with_capacity(CONNECTION_CAPACITY),
                 pending: VecDeque::with_capacity(CONNECTION_CAPACITY),
+                retained: Vec::with_capacity(CONNECTION_CAPACITY),
             }),
             ready: Condvar::new(),
         });
@@ -205,9 +234,26 @@ impl Runtime {
                         let Some(resource) = resource else {
                             return;
                         };
-                        resource.close();
+                        if !matches!(native_call("cleanup", || resource.close()), Ok(Ok(()))) {
+                            report_failure(
+                                "native cleanup failed; affected resources are unusable",
+                            );
+                            if !resource.fail() {
+                                // Keep unsafe-to-drop handles and their reservations bounded.
+                                cleanup
+                                    .registry
+                                    .lock()
+                                    .expect("registry lock poisoned")
+                                    .retained
+                                    .push(resource);
+                                continue;
+                            }
+                        }
                         resource.finish();
                         // Native client destruction also runs outside the registry lock.
+                        if native_call("resource destruction", || drop(resource)).is_err() {
+                            report_failure("native resource destruction panicked");
+                        }
                     }
                 });
             match worker {
@@ -315,6 +361,7 @@ struct Registry {
     stopping: bool,
     resources: Vec<(Weak<dyn Resource>, Arc<AtomicU8>)>,
     pending: VecDeque<Arc<dyn Resource>>,
+    retained: Vec<Arc<dyn Resource>>,
 }
 
 const CLEANUP_WORKERS: usize = 4;
@@ -331,6 +378,87 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn cleanup_workers_survive_native_panics_and_process_later_resources() {
+        let runtime = Runtime::start().unwrap();
+        let mut failed = Vec::new();
+        for _ in 0..CLEANUP_WORKERS {
+            let resource = Arc::new(Managed::new(Arc::new(Client::new(37)), None, |_: i32| {
+                panic!("native teardown fault")
+            }));
+            runtime.register(resource.clone()).unwrap();
+            resource.connect(Ok).unwrap();
+            runtime.enqueue(resource.clone());
+            failed.push(resource);
+        }
+        let (finished, finishing) = mpsc::channel();
+        let healthy = Arc::new(Managed::new(
+            Arc::new(Client::new(19)),
+            None,
+            |native: (i32, mpsc::Sender<()>)| {
+                native.1.send(()).unwrap();
+                native.0
+            },
+        ));
+        runtime.register(healthy.clone()).unwrap();
+        healthy.connect(|value| Ok((value, finished))).unwrap();
+        runtime.enqueue(healthy.clone());
+        let result = finishing.recv_timeout(Duration::from_secs(5));
+        runtime.prepare_shutdown();
+        runtime.join();
+        result.unwrap();
+        for resource in failed {
+            assert!(resource.native.closed());
+            assert!(resource.client.with_available(|_| Ok(())).is_err());
+            assert!(resource.close().is_err());
+        }
+        assert_eq!(
+            healthy.client.with_available(|value| Ok(*value)).unwrap(),
+            19
+        );
+    }
+
+    #[test]
+    fn poisoned_lifecycle_retains_native_ownership_and_its_capacity_reservation() {
+        let runtime = Runtime::start().unwrap();
+        let resource = Arc::new(Managed::new(
+            Arc::new(Client::new(37)),
+            None,
+            |value: i32| value,
+        ));
+        runtime.register(resource.clone()).unwrap();
+        resource.connect(Ok).unwrap();
+        // Fault injection before native ownership is consumed.
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _opening = resource.opening.lock().unwrap();
+            panic!("lifecycle fault");
+        }))
+        .is_err());
+        runtime.enqueue(resource.clone());
+        let mut resources = Vec::new();
+        for _ in 1..CONNECTION_CAPACITY {
+            let next = Arc::new(Managed::new(
+                Arc::new(Client::new(19)),
+                None,
+                |value: i32| value,
+            ));
+            runtime.register(next.clone()).unwrap();
+            resources.push(next);
+        }
+        let next = Arc::new(Managed::new(
+            Arc::new(Client::new(19)),
+            None,
+            |value: i32| value,
+        ));
+        assert!(runtime.register(next).is_err());
+        runtime.prepare_shutdown();
+        runtime.join();
+        assert!(!resource.native.closed());
+        assert!(resource.client.with_available(|_| Ok(())).is_err());
+        assert!(resource.close().is_err());
+        assert!(resources.iter().all(|resource| resource.native.closed()));
+    }
 
     #[test]
     fn cleanup_continues_while_another_native_teardown_is_blocked() {
@@ -399,7 +527,7 @@ mod tests {
         Python::attach(|py| assert!(error.is_instance_of::<PyRuntimeError>(py)));
         runtime.enqueue(next.clone());
         assert_eq!(next.client.with_available(|value| Ok(*value)).unwrap(), 19);
-        resources[0].close();
+        resources[0].close().unwrap();
         runtime.register(next.clone()).unwrap();
         next.connect(Ok).unwrap();
         runtime.prepare_shutdown();
@@ -473,7 +601,7 @@ mod tests {
             runtime.register(resource.clone()).unwrap();
             resource.connect(Ok).unwrap();
             runtime.enqueue(resource.clone());
-            resource.close();
+            resource.close().unwrap();
             runtime.enqueue(resource.clone());
             pending.push(resource);
         }
@@ -492,7 +620,7 @@ mod tests {
     fn teardown_before_native_open_prevents_late_connection_creation() {
         let client = Arc::new(Client::new(37));
         let resource = Managed::new(Arc::clone(&client), None, |native: i32| native);
-        resource.close();
+        resource.close().unwrap();
         assert!(resource
             .connect(|_| panic!("closed resource must not open"))
             .is_err());
@@ -521,7 +649,7 @@ mod tests {
             opening.recv_timeout(Duration::from_secs(5)).unwrap();
             scope.spawn(|| {
                 closing.send(()).unwrap();
-                resource.close();
+                resource.close().unwrap();
                 done.send(()).unwrap();
             });
             closing_started
@@ -536,6 +664,28 @@ mod tests {
         });
         assert!(resource.native.closed());
         assert_eq!(client.with_available(|native| Ok(*native)).unwrap(), 37);
+    }
+
+    #[test]
+    #[ignore = "must run alone in a fresh process: finalizes CPython"]
+    fn interpreter_finalization_survives_native_cleanup_panics() {
+        let mut resources = Vec::new();
+        // SAFETY: isolated process; these resources contain no Python objects or callbacks.
+        unsafe {
+            pyo3::with_embedded_python_interpreter(|py| {
+                initialize(py).unwrap();
+                for _ in 0..CLEANUP_WORKERS {
+                    let resource =
+                        Arc::new(Managed::new(Arc::new(Client::new(37)), None, |_: i32| {
+                            panic!("finalization teardown fault")
+                        }));
+                    register(resource.clone()).unwrap();
+                    resource.connect(Ok).unwrap();
+                    resources.push(resource);
+                }
+            });
+        }
+        assert!(resources.iter().all(|resource| resource.native.closed()));
     }
 
     #[test]

@@ -51,6 +51,7 @@ def test_native_callback_lifecycle_completes_without_deadlock() -> None:
         for t in (
             "callback::tests::interpreter_finalization_drains_a_live_input",
             "lifecycle::tests::shutdown_rejects_new_registrations_and_is_idempotent",
+            "lifecycle::tests::interpreter_finalization_survives_native_cleanup_panics",
         ):
             subprocess.run(
                 [executable, t, "--exact", "--ignored", "--test-threads=1"],

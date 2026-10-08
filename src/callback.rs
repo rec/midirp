@@ -1,17 +1,21 @@
 //! Direct native-thread delivery with a GC-visible callable and a drain gate.
 
 use std::cell::Cell;
-use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, LockResult, Mutex, MutexGuard};
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::{PyTraverseError, PyVisit};
 
+use crate::errors::failed_error;
+
 /// Owns the callable and drains all admitted deliveries before native teardown.
 pub struct Callback {
     state: Mutex<DispatchState>,
     drained: Condvar,
+    failed: AtomicBool,
 }
 
 impl Callback {
@@ -26,12 +30,13 @@ impl Callback {
                 active: 0,
             }),
             drained: Condvar::new(),
+            failed: AtomicBool::new(false),
         })
     }
 
     pub fn deliver(&self, timestamp: u64, message: &[u8]) {
         let _delivery = {
-            let mut state = self.state.lock().expect("callback state lock poisoned");
+            let mut state = self.recover(self.state.lock());
             if !state.accepting {
                 return;
             }
@@ -43,7 +48,7 @@ impl Callback {
         Python::try_attach(|py| {
             let _thread = CallbackThread::enter();
             let callable = {
-                let state = self.state.lock().expect("callback state lock poisoned");
+                let state = self.recover(self.state.lock());
                 // Close may have started while this thread waited for the GIL.
                 if !state.accepting {
                     return;
@@ -63,13 +68,13 @@ impl Callback {
     }
 
     pub fn traverse(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        let state = self.state.lock().expect("callback state lock poisoned");
+        let state = self.recover(self.state.lock());
         visit.call(&state.callable)
     }
 
     pub fn retire(&self) {
         let retired = {
-            let mut state = self.state.lock().expect("callback state lock poisoned");
+            let mut state = self.recover(self.state.lock());
             state.accepting = false;
             state.callable.take()
         };
@@ -77,14 +82,33 @@ impl Callback {
         drop(retired);
     }
 
-    pub fn drain(&self) {
-        let mut state = self.state.lock().expect("callback state lock poisoned");
+    pub fn drain(&self) -> PyResult<()> {
+        let mut state = self.recover(self.state.lock());
         state.accepting = false;
         while state.active != 0 {
-            state = self
-                .drained
-                .wait(state)
-                .expect("callback state lock poisoned");
+            state = self.recover(self.drained.wait(state));
+        }
+        if self.failed.load(Ordering::Acquire) {
+            Err(failed_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn recover<'a>(
+        &self,
+        result: LockResult<MutexGuard<'a, DispatchState>>,
+    ) -> MutexGuard<'a, DispatchState> {
+        match result {
+            Ok(state) => state,
+            Err(poisoned) => {
+                // No user/native calls mutate this gate under its lock. Preserve
+                // admitted-delivery accounting, but permanently refuse new work.
+                let mut state = poisoned.into_inner();
+                state.accepting = false;
+                self.failed.store(true, Ordering::Release);
+                state
+            }
         }
     }
 }
@@ -110,11 +134,7 @@ struct Delivery<'a> {
 
 impl Drop for Delivery<'_> {
     fn drop(&mut self) {
-        let mut state = self
-            .callback
-            .state
-            .lock()
-            .expect("callback state lock poisoned");
+        let mut state = self.callback.recover(self.callback.state.lock());
         state.active -= 1;
         if state.active == 0 {
             self.callback.drained.notify_all();
@@ -173,8 +193,7 @@ mod tests {
         fn close(&self, py: Python<'_>) -> PyResult<()> {
             check_blocking_thread()?;
             self.resource.retire();
-            py.detach(|| self.resource.close());
-            Ok(())
+            py.detach(|| self.resource.close())
         }
 
         #[getter]
@@ -670,6 +689,79 @@ mod tests {
                 assert!(error.is_instance_of::<PyRuntimeError>(py));
                 assert!(error.value(py).to_string().contains("controlling thread"));
             }
+        });
+    }
+
+    #[test]
+    fn poisoned_callback_gate_drains_admitted_delivery_and_retires_python_references() {
+        let _test = TEST_LOCK.lock().unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let recorder = fixtures(py)
+                .getattr("BlockingRecorder")
+                .unwrap()
+                .call0()
+                .unwrap();
+            let reference = PyModule::import(py, "weakref")
+                .unwrap()
+                .call_method1("ref", (&recorder,))
+                .unwrap();
+            let callback = Arc::new(Callback::new(py, recorder.clone().unbind()).unwrap());
+            let resource = Arc::new(Managed::new(
+                Arc::new(Client::new(())),
+                Some(Arc::clone(&callback)),
+                |()| (),
+            ));
+            resource.connect(Ok).unwrap();
+            let active_callback = Arc::clone(&callback);
+            let active = thread::spawn(move || active_callback.deliver(1, &[0xf8]));
+            assert!(recorder
+                .getattr("started")
+                .unwrap()
+                .call_method1("wait", (5,))
+                .unwrap()
+                .extract::<bool>()
+                .unwrap());
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _state = callback.state.lock().unwrap();
+                panic!("callback gate fault");
+            }))
+            .is_err());
+            let delivering = Arc::clone(&callback);
+            py.detach(move || {
+                thread::spawn(move || delivering.deliver(2, &[0xfe]))
+                    .join()
+                    .unwrap()
+            });
+            let messages: Vec<(u64, Vec<u8>)> =
+                recorder.getattr("messages").unwrap().extract().unwrap();
+            assert_eq!(messages, vec![(1, vec![0xf8])]);
+            resource.retire();
+            let (done, completed) = mpsc::channel();
+            let closing_resource = Arc::clone(&resource);
+            let closing = thread::spawn(move || done.send(closing_resource.close()).unwrap());
+            let (completed, waiting) = py.detach(move || {
+                let waiting = completed.recv_timeout(Duration::from_millis(50));
+                (completed, waiting)
+            });
+            recorder
+                .getattr("release")
+                .unwrap()
+                .call_method0("set")
+                .unwrap();
+            let result = py.detach(move || {
+                let result = completed.recv_timeout(DEADLINE).unwrap();
+                closing.join().unwrap();
+                active.join().unwrap();
+                result
+            });
+            assert!(matches!(waiting, Err(mpsc::RecvTimeoutError::Timeout)));
+            drop(recorder);
+            assert!(reference.call0().unwrap().is_none());
+            let error = result.unwrap_err();
+            assert!(error.is_instance_of::<PyRuntimeError>(py));
+            assert!(!resource.native.closed());
+            assert!(resource.client.with_available(|_| Ok(())).is_err());
         });
     }
 

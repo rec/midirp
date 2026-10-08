@@ -166,11 +166,31 @@ and propagates body exceptions. Handles cannot be constructed directly.
 | Wrong argument type/direction | `TypeError` |
 | Unknown filter bits | `ValueError` |
 | Busy/unavailable client, closed connection, blocking MIDI call from callback | `RuntimeError` |
+| Caught native panic or subsequently failed resource | `RuntimeError` |
 | Virtual ports on Windows | `NotImplementedError` |
 
 The four native errors inherit from `MidiError` and retain upstream detail.
 There is no automatic retry, reconnection, or promise of immediate unplug
 detection. Handle device failures in the application.
+
+Caught Rust panics in native client creation, discovery/configuration, port
+metadata, connect, send, or close become `RuntimeError`. Panics during client
+operations permanently disable that client; connect/send/close panics also
+disable the connection. Create a fresh client explicitly. An ordinary returned
+native error continues to use its usual exception and ownership behavior.
+A failed send may still own a native handle: close attempts teardown, but reports
+the failed state even if teardown completes. `closed` indicates consumed native
+ownership, including after a teardown panic; it does not prove successful OS
+cleanup. Subsequent close on a failed resource reports `RuntimeError`.
+
+Cleanup logs recoverable failures to standard error and continues with other
+jobs. If a failure leaves a native handle owned, it is retained until process
+exit and keeps its capacity reservation. It is not blindly destroyed or retried.
+Caught native-client destruction panics are also reported without unwinding
+through Python destruction. These protections do not recover process aborts,
+memory corruption, allocation failure that aborts the process, or panics across
+non-unwinding OS callback boundaries. Rust's panic diagnostics may also appear
+on standard error.
 
 Native open, discovery, send, and close have no guaranteed completion deadline.
 For example, WinMM can retry indefinitely while a driver stays busy. A callback

@@ -80,7 +80,7 @@ class MidiOutput:
     def create_virtual(self, port_name: str) -> MidiOutputConnection: ...
 
 class MidiInputConnection:
-    """An owned connection that restores its original client when closed."""
+    """Close restores the client unless a caught panic permanently disabled it."""
 
     @property
     def closed(self) -> bool: ...
@@ -94,7 +94,7 @@ class MidiInputConnection:
     ) -> None: ...
 
 class MidiOutputConnection:
-    """An owned connection that restores its original client when closed."""
+    """Close restores the client unless a caught panic permanently disabled it."""
 
     def send(self, message: bytes) -> None: ...
     @property

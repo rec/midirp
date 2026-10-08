@@ -7,7 +7,7 @@ use pyo3::types::PyBytes;
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::callback::check_blocking_thread;
-use crate::errors::{InitError, PortInfoError};
+use crate::errors::{native_call, InitError, PortInfoError};
 use crate::lifecycle::{self, Managed, Resource};
 use crate::state::Client;
 
@@ -28,17 +28,17 @@ impl MidiOutputPort {
     /// The backend's opaque identifier; no additional persistence guarantee.
     fn id(&self, py: Python<'_>) -> PyResult<String> {
         check_blocking_thread()?;
-        Ok(py.detach(|| self.native.id()))
+        py.detach(|| native_call("port ID", || self.native.id()))
     }
 
     fn __eq__(&self, py: Python<'_>, other: &Self) -> PyResult<bool> {
         check_blocking_thread()?;
-        Ok(py.detach(|| self.native == other.native))
+        py.detach(|| native_call("port comparison", || self.native == other.native))
     }
 
     fn __ne__(&self, py: Python<'_>, other: &Self) -> PyResult<bool> {
         check_blocking_thread()?;
-        Ok(py.detach(|| self.native != other.native))
+        py.detach(|| native_call("port comparison", || self.native != other.native))
     }
 
     #[classattr]
@@ -58,7 +58,7 @@ impl MidiOutput {
     fn new(py: Python<'_>, client_name: &str) -> PyResult<Self> {
         check_blocking_thread()?;
         let native = py
-            .detach(|| midir::MidiOutput::new(client_name))
+            .detach(|| native_call("create output", || midir::MidiOutput::new(client_name)))?
             .map_err(|error| InitError::new_err(format!("create output: {error}")))?;
         Ok(Self {
             state: Arc::new(Client::new(native)),
@@ -131,16 +131,18 @@ impl MidiOutput {
 impl MidiOutputConnection {
     /// Send immutable bytes unchanged, serialized with native close.
     fn send(&self, py: Python<'_>, message: &Bound<'_, PyBytes>) -> PyResult<()> {
-        self.resource
-            .native
-            .send(py, message, midir::MidiOutputConnection::send)
+        self.resource.native.send(
+            &self.resource.client,
+            py,
+            message,
+            midir::MidiOutputConnection::send,
+        )
     }
 
-    /// Close once and restore the original client. Waits for concurrent close.
+    /// Close once; restore healthy clients. Waits for concurrent close.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         check_blocking_thread()?;
-        py.detach(|| self.resource.close());
-        Ok(())
+        py.detach(|| self.resource.close())
     }
 
     #[getter]
@@ -149,6 +151,7 @@ impl MidiOutputConnection {
     }
 
     fn __enter__(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<Self>> {
+        slf.get().resource.native.check_failed()?;
         if py.detach(|| slf.get().resource.native.closed()) {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "MIDI connection is closed",
@@ -231,16 +234,16 @@ pub(crate) mod tests {
     #[pymethods]
     impl OutputDriver {
         fn send(&self, py: Python<'_>, message: &Bound<'_, PyBytes>) -> PyResult<()> {
-            self.connection.send(py, message, |(), bytes| {
-                self.messages.lock().unwrap().push(bytes.to_vec());
-                Ok(())
-            })
+            self.connection
+                .send(&self.client, py, message, |(), bytes| {
+                    self.messages.lock().unwrap().push(bytes.to_vec());
+                    Ok(())
+                })
         }
 
         fn close(&self, py: Python<'_>) -> PyResult<()> {
             check_blocking_thread()?;
-            py.detach(|| self.connection.close(&self.client, |()| ()));
-            Ok(())
+            py.detach(|| self.connection.close(&self.client, |()| ()))
         }
     }
 

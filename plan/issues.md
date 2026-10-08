@@ -7,6 +7,8 @@ Source review dated 2026-10-08, against binding commit `b7f50d0`, midir
 This is an issue inventory and proposed investigation plan, not a claim that
 every failure below has been reproduced. No implementation changes or new
 runtime checks were made for this review.
+Open findings are updated as fixes land; resolved issues are removed.
+Remove resolved issue text in the last commit of its fix series.
 
 Additional work beyond the prompt
 
@@ -44,14 +46,13 @@ references and function names refer to that pinned source, not a newer release.
 
 | ID | Severity | Evidence | Concern |
 | --- | --- | --- | --- |
-| L4 | High | Confirmed in source | Panic paths bypass ownership restoration and can poison locks or terminate cleanup. |
 | B1 | High | Confirmed in source | ALSA input thread-start failure returns a client with its sequencer missing. |
 | B2 | Medium | Confirmed in source | Failed ALSA opens can leave queues or ports allocated on the restored client. |
 | B3 | High | Confirmed cleanup gaps; possible unsafe callback | WinMM partial input-open failures lack complete native rollback. |
 | B4 | High | Possible | WinMM reset/requeue lock interaction and failed buffer unpreparation need native fault checks. |
 | B5 | High | Confirmed parser assumption; possible trigger | Truncated CoreMIDI packets can panic in native callback parsing. |
 | R1 | Medium | Confirmed in source | macOS clients are deliberately retained until process termination upstream. |
-| R2 | Medium/High | Confirmed unbounded paths | Cleanup backlog, unfinished SysEx, and application queues can exhaust memory. |
+| R2 | Medium/High | Confirmed unbounded paths | Unfinished SysEx and application queues can exhaust memory; failed cleanup retains bounded native resources. |
 | D1 | Medium | API limitation | Open/closed state does not identify unplugged, rebooted, or unresponsive devices. |
 | A1 | Medium | API limitation | This is an adapted Python API, not an exact Rust API mirror. |
 
@@ -61,29 +62,6 @@ Agreed approach: retain the in-process binding and reduce avoidable waits.
 Guaranteed native-operation or shutdown deadlines would require process
 isolation and remain outside this implementation. L issues are handled
 sequentially, with focused device-free checks and separate commits.
-
-### L4. Panics are not ordinary MIDI errors or transactional failures
-
-**Confirmed in source.** Native connect runs after the client state changes to
-`Connecting`; only a returned `ConnectError` restores the client. A Rust panic
-instead bypasses restoration. Close takes the native handle and sets `Closing`
-before teardown; a teardown panic similarly bypasses client restoration.
-The opening/connection/state locks use `expect()` on poisoning. The cleanup
-worker has no panic recovery, and subsequent deferred cleanup expects a live
-receiver. One upstream panic can therefore leave a client unusable, poison
-locks, kill cleanup, and cause further panics during destruction or shutdown.
-
-Upstream has fallible allocation/queue operations handled with `unwrap()` or
-assertions. CoreMIDI packet construction asserts that `MIDIPacketListAdd`
-succeeded; ALSA asserts output length fits `u32` and unwraps queue allocation.
-PyO3's panic conversion is not the four normal `MidiError` subclasses; Rust
-panics crossing a non-unwinding native callback boundary can terminate the
-process. A panic during unwinding/destruction can also abort it.
-
-**Proposed investigation:** fault injection at connect, send, teardown, and
-worker boundaries, checking subsequent client use and finalization in separate
-processes. Recovery must account for the native handle's actual state; merely
-catching a panic and declaring the client available would be misleading.
 
 ### L5. Races are serialized, but callers still need ownership discipline
 
@@ -107,6 +85,10 @@ application waits or faulty drivers.
 ### L6. Interpreter shutdown and process lifecycle have additional constraints
 
 **API limitation and possible hangs.** Cleanup runs through Python `atexit`.
+Recoverable Rust unwinding does not cover allocator/process aborts, memory
+corruption, double panics during unwinding, or non-unwinding OS callback
+boundaries. The backend-specific unsafe/error paths below still need their own
+fixes. Resources retained after failed cleanup keep capacity until process exit.
 Application callback waits can still deadlock draining: a callback must not
 wait for its closer, acquire a lock held by its closer, or block on a full queue
 whose consumer has stopped to close input. The MIDI API guard does not detect
@@ -143,7 +125,9 @@ either safely works or cleanly fails.
 moves `self.seq` into `HandlerData` before spawning the reader thread. On spawn
 failure it returns `ConnectError` containing `self`, whose `seq` is now `None`.
 The Python binding restores that object as `Available`. Later discovery or
-connect operations unwrap the missing sequencer and panic.
+connect operations unwrap the missing sequencer and panic upstream. The binding
+now catches that panic and disables the client, but the returned failed-open
+client is still unusable.
 
 This contradicts the unqualified README/stub promise that failed opens leave a
 usable client. Thread exhaustion is a concrete trigger. The binding's own
@@ -371,8 +355,9 @@ though the context manager closes correctly.
 Messages retained by application code remain valid because the bridge copies
 them into owned bytes. That safety property also means retention costs real
 memory. There is no input message-size limit, throughput admission control,
-overflow counter, or memory budget exposed by the binding. An unfinished native
-SysEx buffer can retain its allocated capacity after it is cleared.
+overflow counter, or byte-based memory budget exposed by the binding. An
+unfinished native SysEx buffer can retain its allocated capacity after it is
+cleared.
 
 Blocking disk/network logging in an error hook or callback can become MIDI
 liveness failure. Full disk can hide diagnostics if the application's logger
@@ -461,8 +446,10 @@ fail during interpreter shutdown through `try_attach`, skipping Python delivery.
 ### A4. Documentation and supported-platform boundaries
 
 **Validation gaps.** The unqualified failed-open restoration promise needs the
-B1 caveat. Claims about exception detail should distinguish human-readable
-strings from preserved native error kinds. Cross-platform SysEx framing and
+B1 caveat for returned upstream errors. Caught panics now permanently disable
+affected client/connection ownership, as documented in the README. Claims about
+exception detail should distinguish human-readable strings from preserved
+native error kinds. Cross-platform SysEx framing and
 the process-lifetime CoreMIDI client policy deserve prominent usage guidance.
 The stub describes handles as unhashable but does not explicitly declare a
 `__hash__ = None` surface; static-tool behavior should be checked before calling
@@ -486,12 +473,12 @@ software endpoints or hardware; ordinary CI should not probe arbitrary devices.
 1. Address the source-established ALSA unusable-client path and WinMM partial
    initialization/teardown risks first. Decide whether to contribute upstream
    changes or adopt an already verified upstream fix before changing pins.
-2. Add isolated fault-injection checks for panic restoration, cleanup-worker
-   failure, allocation failure, native busy loops, and failed rollback. Verify
-   that failures cannot silently strand all future cleanup.
+2. Investigate allocator aborts, native busy loops, backend failed rollback, and
+   unsafe callback boundaries in isolated processes. These are outside the
+   binding's recoverable-panic containment.
 3. Reproduce bounded subprocess liveness cases for application wait cycles,
-   callback output reentrancy, close versus send, queued SysEx teardown, and
-   exit-handler ordering. Distinguish native hangs from Python lock cycles.
+   queued SysEx teardown, and exit-handler ordering. Distinguish native hangs
+   from Python lock cycles.
 4. Run authorized unplug/replug, device/driver restart, long SysEx, overload,
    and long-duration timestamp tests on each backend. Record message loss,
    cleanup time, surviving resources, exceptions, and identity changes.

@@ -1,5 +1,32 @@
+use std::io::{self, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyRuntimeError};
+use pyo3::PyResult;
+
+/// Callers must invalidate affected ownership when a native call unwinds.
+pub fn native_call<T>(operation: &str, call: impl FnOnce() -> T) -> PyResult<T> {
+    catch_unwind(AssertUnwindSafe(call)).map_err(|payload| {
+        let detail = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("unknown panic");
+        PyRuntimeError::new_err(format!(
+            "native MIDI {operation} panicked; recreate affected resources: {detail}"
+        ))
+    })
+}
+
+pub fn failed_error() -> pyo3::PyErr {
+    PyRuntimeError::new_err("MIDI resource failed after a native panic; create a new client")
+}
+
+/// Diagnostics must not turn cleanup failures into another unwind.
+pub fn report_failure(message: &str) {
+    let _ = writeln!(io::stderr().lock(), "midirp: {message}");
+}
 
 create_exception!(
     midirp.midi,
