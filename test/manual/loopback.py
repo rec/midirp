@@ -5,6 +5,8 @@ import sys
 from contextlib import ExitStack
 from pathlib import Path
 from queue import Queue
+from statistics import median
+from time import perf_counter_ns
 from uuid import uuid4
 
 import pytest
@@ -120,6 +122,56 @@ def test_native_interpreter_exit_drains_live_connections_and_queued_traffic() ->
         timeout=20,
     )
     assert result.stderr == ""
+
+
+@pytest.mark.parametrize("size", [128, 1024, 16384])
+def test_larger_sysex_is_preserved_after_close(size: int) -> None:
+    require_unix()
+    receiver = Collector()
+    source = midi.MidiInput("midirp SysEx input")
+    target = midi.MidiOutput("midirp SysEx output")
+    token = f"midirp-sysex-{uuid4().hex}"
+    message = b"\xf0\x7d" + bytes(i % 128 for i in range(size - 3)) + b"\xf7"
+    with source.create_virtual(token, receiver):
+        (port,) = (p for p in target.ports() if token in target.port_name(p))
+        with target.connect(port, token) as outgoing:
+            outgoing.send(message)
+            timestamp, retained = receiver.messages.get(timeout=5)
+    assert retained == message
+    assert timestamp >= 0
+
+
+def test_burst_delivery_records_software_loopback_timing() -> None:
+    require_unix()
+    arrivals: Queue[tuple[int, bytes]] = Queue()
+
+    def receive(timestamp: int, message: bytes) -> None:
+        arrivals.put((perf_counter_ns(), message))
+
+    source = midi.MidiInput("midirp timing input")
+    target = midi.MidiOutput("midirp timing output")
+    token = f"midirp-timing-{uuid4().hex}"
+    count = 1000
+    sent: dict[bytes, int] = {}
+    with source.create_virtual(token, receive):
+        (port,) = (p for p in target.ports() if token in target.port_name(p))
+        with target.connect(port, token) as outgoing:
+            started = perf_counter_ns()
+            for i in range(count):
+                message = bytes((0xB0, i // 128, i % 128))
+                sent[message] = perf_counter_ns()
+                outgoing.send(message)
+            received = [arrivals.get(timeout=5) for _ in range(count)]
+    assert [m for _, m in received] == list(sent)
+    latencies = sorted(t - sent[m] for t, m in received)
+    assert latencies[0] >= 0
+    rate = count * 1e9 / (received[-1][0] - started)
+    print(
+        f"Software loopback, {count} CC messages: {rate:.0f} messages/s; "
+        f"send-to-callback median {median(latencies) / 1e6:.3f} ms, "
+        f"p99 {latencies[count * 99 // 100] / 1e6:.3f} ms, "
+        f"max {latencies[-1] / 1e6:.3f} ms"
+    )
 
 
 def require_unix() -> None:

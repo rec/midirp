@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     strategy:
@@ -21,11 +25,14 @@ jobs:
         os: [ubuntu-24.04, macos-14, macos-15-intel, windows-2022]
         python: ['3.11', '3.12', '3.13', '3.14']
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
     env:
       CARGO_HOME: ${{ github.workspace }}/target/cargo-home
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -52,7 +59,21 @@ jobs:
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
-      - run: uv run --frozen pytest
+      - name: Python tests
+        run: |
+          set +e
+          uv run --frozen pytest > target/pytest.log 2>&1
+          test_status=$?
+          set -e
+          cat target/pytest.log
+          if [[ "$test_status" != 0 ]]; then
+            report=$(tail -c 3500 target/pytest.log)
+            report=${report//'%'/'%25'}
+            report=${report//$'\r'/'%0D'}
+            report=${report//$'\n'/'%0A'}
+            printf '::error title=Python tests::%s\n' "$report"
+          fi
+          exit "$test_status"
       - run: uv run --frozen ruff check --select B,E,F,I python test
       - run: uv run --frozen ruff format --check python test
       - run: uv run --frozen ty check python/midirp test
@@ -67,7 +88,10 @@ jobs:
           command: build
           args: --release --locked --sdist -i ${{ runner.os == 'Linux' && format('python{0}', matrix.python) || 'python' }} --out dist
           manylinux: '2_28'
-          before-script-linux: dnf install -y alsa-lib-devel
+          before-script-linux: |
+            dnf install -y alsa-lib-devel dnf-plugins-core
+            mkdir -p dist
+            dnf download --source --destdir dist alsa-lib
       - name: Install and test wheel outside checkout
         run: |
           uv venv "$RUNNER_TEMP/midirp-wheel" --python '${{ matrix.python }}'
@@ -79,6 +103,7 @@ jobs:
           uv pip install --python "$wheel_python" dist/*.whl pytest
           cd "$RUNNER_TEMP"
           "$wheel_python" -m pytest "$GITHUB_WORKSPACE/test/test_contract.py" "$GITHUB_WORKSPACE/test/test_ignore.py"
+      - run: uv run --frozen pytest test/release/artifacts.py -v
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: midirp-${{ matrix.os }}-cp${{ matrix.python }}
