@@ -6,6 +6,7 @@ rust-version = "1.87"
 description = "Python bindings for the midir Rust MIDI library"
 repository = "https://github.com/rec/midirp"
 publish = false
+license = "MIT"
 
 [lib]
 name = "midi"
