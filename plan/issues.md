@@ -10,6 +10,11 @@ are reflected below; backend defects remain unless explicitly resolved.
 Open findings are updated as fixes land; resolved issues are removed.
 Remove resolved issue text in the last commit of its fix series.
 
+Preparation of the four upstream reports B3–B6 is complete. They have been
+transferred to [Suggestions for midir maintainers](midir-suggestions.md) for the
+owner to discuss at release time and removed from this implementation backlog.
+This is a handoff, not a claim that their native defects or risks are fixed.
+
 Additional work beyond the prompt
 
 None.
@@ -46,9 +51,6 @@ references and function names refer to that pinned source, not a newer release.
 
 | ID | Severity | Evidence | Concern |
 | --- | --- | --- | --- |
-| B3 | High | Confirmed cleanup gaps; possible unsafe callback | WinMM partial input-open failures lack complete native rollback. |
-| B4 | High | Possible | WinMM reset/requeue lock interaction and failed buffer unpreparation need native fault checks. |
-| B5 | High | Confirmed parser assumption; possible trigger | Truncated CoreMIDI packets can panic in native callback parsing. |
 | R1 | Medium | Confirmed in source | macOS clients are deliberately retained until process termination upstream. |
 | R2 | Medium/High | Confirmed unbounded paths | Unfinished SysEx and application queues can exhaust memory; failed cleanup retains bounded native resources. |
 | D1 | Medium | API limitation | Open/closed state does not identify unplugged, rebooted, or unresponsive devices. |
@@ -67,8 +69,9 @@ in-process native waits, interpreter lifecycle, and shared OS services.
 **API limitation and possible hangs.** Cleanup runs through Python `atexit`.
 Recoverable Rust unwinding does not cover allocator/process aborts, memory
 corruption, double panics during unwinding, or non-unwinding OS callback
-boundaries. The backend-specific unsafe/error paths below still need their own
-fixes. Resources retained after failed cleanup keep capacity until process exit.
+boundaries. The native unsafe/error paths in the
+[upstream report](midir-suggestions.md) still need their own fixes. Resources
+retained after failed cleanup keep capacity until process exit.
 Application callback waits can still deadlock draining: a callback must not
 wait for its closer, acquire a lock held by its closer, or block on a full queue
 whose consumer has stopped to close input. The MIDI API guard does not detect
@@ -92,94 +95,6 @@ usable copy of the cleanup thread and is unsupported. Use a fresh interpreter
 in the child, as documented. Subinterpreters are rejected. Reinitializing an
 embedded main interpreter in the same process is unvalidated: the process-wide
 `OnceLock` survives and its registry may already be marked closing.
-
-## Backend-specific exceptional paths
-
-### B3. WinMM partial initialization lacks complete rollback
-
-**High; confirmed missing cleanup, possible native memory-safety consequences.**
-After `midiInOpen`, midir allocates four raw 1,024-byte SysEx buffers and prepares
-and queues each header. Failures from `midiInPrepareHeader` or `midiInAddBuffer`
-return without closing the native input handle or releasing every allocation.
-The source contains TODOs acknowledging these gaps. Handler data is then
-dropped even though its pointer was supplied as the native callback context.
-If the still-open driver subsequently invokes a callback that uses that
-context, it can access freed memory. That callback occurrence has not been
-demonstrated here. The start-failure path also lacks the complete ordinary
-buffer teardown sequence.
-
-Raw allocation uses `alloc()` without checking for a null pointer before
-handing the buffer to WinMM. Memory exhaustion cannot be assumed to become a
-clean Python `MemoryError` or `ConnectError`.
-
-**Proposed next work:** controlled WinMM failure injection at each preparation,
-queueing, start, and allocation step, with native memory diagnostics and an
-upstream fix review before promising exhaustion-safe input creation.
-
-### B4. WinMM shutdown depends on reset and buffer-return behavior
-
-**High; possible deadlock and unsafe failure handling.** Input close holds the
-native handle mutex while calling `midiInReset` and `midiInStop`. The
-[WinMM callback handler](https://github.com/Boddlnagg/midir/blob/v0.11.0/src/backend/winmm/handler.rs)
-takes the same mutex to requeue a nonempty SysEx buffer. If reset delivers such
-a callback and waits for its completion, this creates a lock cycle. Retiring
-Python delivery does not bypass upstream requeue logic. Empty returned buffers
-are specially excluded upstream, but nonempty reset behavior needs validation.
-
-Close calls unprepare, then frees buffer/header storage even when unprepare
-failed. It only logs a warning. Reset, stop, and final close return values are
-ignored. A driver still referencing that storage after unsuccessful cleanup
-would make this unsafe. These are conditional consequences, not evidence that
-ordinary close on every Windows driver fails.
-
-**Proposed next work:** native teardown with queued, partial, and malformed
-SysEx, unplugging during reception, failed reset/unprepare, and drivers that
-return nonempty buffers during reset. Use isolated, deadline-bounded processes.
-
-### B5. CoreMIDI parsing trusts complete short messages
-
-**High; confirmed unchecked slice, malformed-packet trigger untested.** The
-[CoreMIDI backend](https://github.com/Boddlnagg/midir/blob/v0.11.0/src/backend/coremidi/mod.rs)
-infers a message length from its status byte, then slices
-`pdata[cur_byte..cur_byte + size]` without checking the packet has that many
-remaining bytes. A truncated note or other multi-byte message can panic before
-the binding sees it. A native peer able to submit malformed packets is a
-possible trigger; existing loopback checks send well-formed data.
-
-**Proposed next work:** focused upstream parser tests with truncated messages,
-running status, interleaved realtime, and multiple messages per packet. Any
-native malformed-input reproduction belongs in an isolated process because a
-panic can cross the OS callback boundary.
-
-### B6. Message framing, loss, and errors differ between backends
-
-**Confirmed in source; medium API portability risk.** WinMM forwards large
-SysEx in chunks from its 1,024-byte input buffers and explicitly does not
-reassemble them. CoreMIDI and ALSA accumulate segmented SysEx. Consequently one
-callback is not a portable promise of one complete SysEx message. WinMM long
-error notifications and failed buffer requeue are not surfaced as a structured
-Python device-error event. Its four native buffers do not establish a maximum
-whole-message size or a no-loss guarantee.
-
-ALSA queue allocation/initialization uses `unwrap()`, so exhaustion can panic
-instead of returning `ConnectError`. Queue start/drain errors are also ignored,
-allowing an open to succeed without confirming setup. Failed-open disposal does
-not change those upstream behaviors. Native fault checks remain outstanding.
-
-ALSA logs overrun and other reader errors, then continues. Persistent input
-errors can cause repeated work/logging rather than an application-visible
-disconnect, and potentially a busy loop depending on readiness/error behavior.
-Rust `log` output has no configured Python logging bridge here. An application
-may receive neither a Python exception nor an observable warning about loss.
-
-ALSA output ignores `drain_output()` failure after direct output. Its encoder
-returns a consumed-byte count which midir discards; sending concatenated
-messages should not be assumed to forward every byte as separate MIDI events.
-The backends do different message validation. CoreMIDI can split packet data
-into short messages, while WinMM rejects non-SysEx buffers longer than three
-bytes. Use one well-formed message per send and handle SysEx framing explicitly
-where cross-platform reception requires it. Existing CoreMIDI large-message
-checks do not validate Windows framing.
 
 ## Device disappearance, reboot, and responsiveness
 
@@ -422,21 +337,16 @@ These are recommendations for future authorized work, not changes made by this
 document. Native fault checks need explicit runtime authorization and selected
 software endpoints or hardware; ordinary CI should not probe arbitrary devices.
 
-1. Address WinMM partial initialization/teardown risks first. Decide whether to contribute upstream
-   changes or adopt an already verified upstream fix before changing pins.
-2. Investigate allocator aborts, native busy loops, backend failed rollback, and
-   unsafe callback boundaries in isolated processes. These are outside the
-   binding's recoverable-panic containment.
-3. Reproduce bounded subprocess liveness cases for application wait cycles,
+1. Reproduce bounded subprocess liveness cases for application wait cycles,
    queued SysEx teardown, and exit-handler ordering. Distinguish native hangs
    from Python lock cycles.
-4. Run authorized unplug/replug, device/driver restart, long SysEx, overload,
+2. Run authorized unplug/replug, device/driver restart, long SysEx, overload,
    and long-duration timestamp tests on each backend. Record message loss,
    cleanup time, surviving resources, exceptions, and identity changes.
-5. Validate the new default process boundary on each native backend under faults.
+3. Validate the new default process boundary on each native backend under faults.
    Device-health events and framing changes remain
    separate API decisions; process isolation does not establish device health.
-6. Update user guidance for client retention, asynchronous destruction,
+4. Update user guidance for client retention, asynchronous destruction,
    callback constraints, SysEx framing, API differences, and the limits of
    failed-open restoration after resolving or explicitly accepting those risks.
 
