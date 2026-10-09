@@ -99,7 +99,9 @@ def play_note(port_id: str) -> None:
         connection.send(b"\x80\x3c\x00")
 ```
 
-`send()` accepts immutable `bytes` only. Convert mutable buffers explicitly.
+`send()` accepts `bytes`, `bytearray`, and `memoryview`. Mutable buffers and views
+are copied into owned bytes before native work or waiting for another operation.
+Strided views send their logical byte contents. A released view raises `ValueError`.
 Bytes are forwarded unchanged; midir handles message validity. A native send
 error invalidates an isolated worker; in-process ordinary send errors leave the
 connection open. Sends and close are serialized. In-process native waits release

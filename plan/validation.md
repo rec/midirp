@@ -232,6 +232,15 @@ checker; it does not claim every checker diagnoses every direct `hash()` call.
 All 74 Python checks, Ruff, formatting, ty, pyupgrade, and the scoped diff check
 pass after the stub change.
 
+## Mutable send buffers (A2), 2026-10-09
+
+Public `send()` accepts bytes, bytearray, and memoryview, copying mutable buffers
+and views into bytes before native work or serial waiting. Strided views retain
+their logical contents; native and isolated paths receive the same snapshot.
+Device-free checks cover all three added forms in both modes, including mutation
+of the caller's buffer after the snapshot. All 80 Python checks, Ruff, formatting,
+ty, pyupgrade, and the scoped diff check pass.
+
 ## Native backend checks
 
 `test/manual/loopback.py` explicitly selects unique temporary software endpoints

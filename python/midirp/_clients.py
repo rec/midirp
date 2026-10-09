@@ -380,10 +380,11 @@ class MidiOutputConnection:
         )
         return connection
 
-    def send(self, message: bytes) -> None:
+    def send(self, message: bytes | bytearray | memoryview) -> None:
         _native.check_thread()
-        if not isinstance(message, bytes):
-            raise TypeError("MIDI messages must be immutable bytes")
+        if not isinstance(message, (bytes, bytearray, memoryview)):
+            raise TypeError("MIDI messages must be bytes, bytearray, or memoryview")
+        message = bytes(message)
         if self._native is not None:
             self._native.send(message)
         else:

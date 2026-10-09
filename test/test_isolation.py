@@ -160,6 +160,49 @@ def test_native_failure_invalidates_only_its_worker_and_requires_a_fresh_client(
         connection.send(b"\xf8")
 
 
+@pytest.mark.parametrize("isolated", [True, False])
+@pytest.mark.parametrize("form", ["bytearray", "view", "strided_view"])
+def test_send_snapshots_mutable_and_strided_buffers(
+    isolated: bool, form: str, workers: list[Popen[bytes]]
+) -> None:
+    expected = b"\xf0\x7d\x00\xff\xf7"
+    buffer = bytearray(
+        expected if form != "strided_view" else b"\xf0a\x7db\x00c\xffd\xf7e"
+    )
+    message = (
+        buffer
+        if form == "bytearray"
+        else memoryview(buffer)
+        if form == "view"
+        else memoryview(buffer)[::2]
+    )
+
+    class LocalConnection:
+        def send(self, message: bytes) -> None:
+            buffer[:] = b"x" * len(buffer)
+            assert isinstance(message, bytes)
+            assert message == expected
+
+        def close(self) -> None:
+            pass
+
+    class LocalClient:
+        def __init__(self, name: str) -> None:
+            pass
+
+        def ports(self) -> list[object]:
+            return [object()]
+
+        def connect(self, port: object, name: str) -> LocalConnection:
+            return LocalConnection()
+
+    with patch("midirp._native.MidiOutput", LocalClient):
+        output = midi.MidiOutput("check_bytes", isolated=isolated)
+        connection = output.connect(output.ports()[0], "test")
+        connection.send(message)
+        connection.close()
+
+
 def test_native_close_timeout_consumes_parent_ownership_without_restoring_a_client(
     workers: list[Popen[bytes]],
 ) -> None:

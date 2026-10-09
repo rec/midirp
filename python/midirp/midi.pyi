@@ -124,7 +124,7 @@ class MidiInputConnection:
 class MidiOutputConnection:
     """Successful close restores the client; isolated native failures disable it."""
 
-    def send(self, message: bytes) -> None:
+    def send(self, message: bytes | bytearray | memoryview) -> None:
         """Serialized with send/close; competing threads have no guaranteed order."""
         ...
     @property

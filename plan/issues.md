@@ -359,8 +359,8 @@ not a claim to bind every optional Rust feature or backend.
 - A client supports one open connection at a time. Even discovery and filter
   changes reject use while it is connecting, connected, or closing. Applications
   needing concurrent connections/discovery need appropriately separate clients.
-- `send()` accepts immutable `bytes`, not a list of MIDI integers, `bytearray`,
-  `memoryview`, or a parsed-message object. The binding does not apply uniform
+- `send()` does not accept a list of MIDI integers or a parsed-message object.
+  The binding does not apply uniform
   cross-backend MIDI validation or concatenate/parse arbitrary message streams.
 - Port IDs and `closed` are methods/property respectively: use `port.id()` and
   `connection.closed`. Ports are opaque, direction-specific, unhashable handles;
