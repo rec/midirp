@@ -15,11 +15,37 @@ from typing import BinaryIO, NoReturn, cast
 
 from . import _native
 
+DEFAULT_RECEIVE_BYTE_LIMIT = 8 * 1024 * 1024
+
+
+class ReceiveQueue(Queue[tuple[int, bytes]]):
+    """Bound queued message payloads under the queue's existing mutex."""
+
+    def __init__(self, byte_limit: int) -> None:
+        super().__init__(RECEIVE_CAPACITY)
+        self.byte_limit = byte_limit
+        self.payload_bytes = 0
+
+    def _put(self, item: tuple[int, bytes]) -> None:
+        if self.payload_bytes + len(item[1]) > self.byte_limit:
+            raise Full
+        super()._put(item)
+        self.payload_bytes += len(item[1])
+
+    def _get(self) -> tuple[int, bytes]:
+        item = super()._get()
+        self.payload_bytes -= len(item[1])
+        return item
+
 
 class Delivery:
-    def __init__(self, callback: Callable[[int, bytes], object]) -> None:
+    def __init__(
+        self,
+        callback: Callable[[int, bytes], object],
+        byte_limit: int = DEFAULT_RECEIVE_BYTE_LIMIT,
+    ) -> None:
         self.bridge = _native.CallbackBridge(callback)
-        self.messages: Queue[tuple[int, bytes]] = Queue(RECEIVE_CAPACITY)
+        self.messages = ReceiveQueue(byte_limit)
         self.retired = False
         self.dropped = 0
         self.worker_dropped = 0
@@ -48,10 +74,13 @@ class Delivery:
 
 
 class Context:
-    def __init__(self, timeout: float) -> None:
+    def __init__(
+        self, timeout: float, receive_byte_limit: int = DEFAULT_RECEIVE_BYTE_LIMIT
+    ) -> None:
         if SHUTTING_DOWN:
             raise RuntimeError("MIDI interpreter shutdown has begun")
         self.timeout = timeout
+        self.receive_byte_limit = receive_byte_limit
         self.operation = Lock()
         self.requests: Queue[tuple[str, list[object]]] = Queue(1)
         self.replies: Queue[tuple[str, object]] = Queue(1)
@@ -188,11 +217,15 @@ class Context:
             self.state = "opening"
             self.generation += 1
             self.worker_dropped = 0
-            delivery = Delivery(callback) if callback is not None else None
+            delivery = (
+                Delivery(callback, self.receive_byte_limit)
+                if callback is not None
+                else None
+            )
             self.delivery = weakref.ref(delivery) if delivery is not None else None
             self.exchange(
                 operation,
-                [identifier, name, self.generation],
+                [identifier, name, self.generation, self.receive_byte_limit],
                 monotonic() + self.timeout,
             )
             self.state = "connected"

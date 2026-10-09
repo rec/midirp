@@ -297,7 +297,7 @@ though the context manager closes correctly.
 | --- | --- | --- |
 | Python/native heap | Owned input `bytes`, native message vectors, outgoing SysEx copies/buffers, port lists | Large messages and retained messages consume memory; allocator failures are not uniformly translated to Python exceptions. |
 | SysEx assembly storage | CoreMIDI/ALSA append until completion | Missing `F7` plus continuing packets can grow buffers without a size/deadline cap; no callback is delivered for the unfinished message. |
-| Isolated receive queues | 128 messages in the child and 128 in the parent; drop newest and count | Capacity is in messages, not bytes. Worker crashes can lose the final counter; driver loss is not counted. |
+| Isolated receive accounting | Queued payloads are bounded by count and bytes; drop newest and count | Worker crashes can lose the final counter; driver loss is not counted. In-flight payloads and allocation overhead are outside the queue budgets. |
 | In-process cleanup queue | Up to 32 reserved resources and four workers | Stalled jobs retain their native resources and clients; all four stalled workers prevent further progress. |
 | CPU/GIL | Per-message Python attachment, copies, callback calls, error hooks | Floods, slow callbacks, or repeated exceptions consume CPU and delay unrelated Python work; no backpressure, batch API, or real-time deadline. |
 | Threads/stack | Four cleanup workers per interpreter; two communication threads per isolated client, a parent dispatch thread and child forwarding thread per isolated input; ALSA input reader per input connection; OS-managed backend callback work | OS thread quotas or memory limits can stop import/open. |
@@ -309,8 +309,8 @@ though the context manager closes correctly.
 
 Messages retained by application code remain valid because the bridge copies
 them into owned bytes. That safety property also means retention costs real
-memory. There is no input message-size limit, throughput admission control,
-or byte-based memory budget. Isolated queue overflow is counted, but unfinished
+memory. There is no native input message-size limit or throughput admission
+control. Isolated queue overflow is counted, but unfinished
 native SysEx grows before it reaches those queues. An
 unfinished native SysEx buffer can retain its allocated capacity after it is
 cleared.

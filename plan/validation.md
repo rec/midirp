@@ -261,6 +261,20 @@ their original exception type. Device-free checks cover both directions, both
 modes, ordinary body errors, interrupts, and isolated close timeouts.
 All 91 Python checks, Ruff, formatting, ty, pyupgrade, and the scoped diff check pass.
 
+## Receive payload budgets (R2), 2026-10-09
+
+`MidiInput(receive_byte_limit=8_388_608)` sets an 8 MiB default payload budget for
+each isolated receive stage, alongside the existing 128-message limit. Both
+stages reuse one queue implementation; admission and byte release occur under
+its existing mutex. Oversized/full-budget messages are dropped without waiting
+and counted. In-process mode adds no queue and does not apply this limit.
+
+Device-free checks cover budget exhaustion, oversized single messages, capacity
+recovery after dequeue, invalid settings, and configured child-stage drops.
+All 98 Python checks, Ruff, formatting, ty, pyupgrade, and the scoped diff check
+pass. Queue budgets exclude interpreter overhead, in-flight messages, native
+unfinished SysEx, and application-retained messages; those R2 risks remain open.
+
 ## Native backend checks
 
 `test/manual/loopback.py` explicitly selects unique temporary software endpoints

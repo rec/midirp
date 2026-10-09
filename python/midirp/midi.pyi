@@ -59,7 +59,12 @@ class MidiInput:
     """An input client that cannot be used while its connection is open."""
 
     def __init__(
-        self, client_name: str, *, isolated: bool = True, timeout: float = 5.0
+        self,
+        client_name: str,
+        *,
+        isolated: bool = True,
+        timeout: float = 5.0,
+        receive_byte_limit: int = 8_388_608,
     ) -> None: ...
     def ports(self) -> list[MidiInputPort]: ...
     def port_name(self, port: MidiInputPort) -> str: ...

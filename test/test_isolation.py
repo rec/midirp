@@ -7,7 +7,7 @@ import weakref
 from collections.abc import AsyncIterator, Callable, Iterator
 from functools import partial
 from pathlib import Path
-from queue import Queue
+from queue import Full, Queue
 from subprocess import Popen
 from threading import Event, Thread
 from time import monotonic, sleep
@@ -16,7 +16,13 @@ from unittest.mock import patch
 
 import pytest
 from midirp import midi
-from midirp._transport import RECEIVE_CAPACITY, Context, Delivery, shutdown
+from midirp._transport import (
+    RECEIVE_CAPACITY,
+    Context,
+    Delivery,
+    ReceiveQueue,
+    shutdown,
+)
 
 
 @pytest.fixture
@@ -43,6 +49,44 @@ def test_defaults_select_isolation_and_five_second_deadlines() -> None:
         parameters = inspect.signature(c).parameters
         assert parameters["isolated"].default is True
         assert parameters["timeout"].default == 5.0
+    assert (
+        inspect.signature(midi.MidiInput).parameters["receive_byte_limit"].default
+        == 8_388_608
+    )
+
+
+def test_receive_budget_recovers_after_dequeue_and_rejects_oversized_messages() -> None:
+    messages = ReceiveQueue(8)
+    messages.put_nowait((0, b"12345"))
+    with pytest.raises(Full):
+        messages.put_nowait((1, b"1234"))
+    assert messages.get_nowait() == (0, b"12345")
+    with pytest.raises(Full):
+        messages.put_nowait((2, b"123456789"))
+    messages.put_nowait((3, b"12345678"))
+    assert messages.get_nowait() == (3, b"12345678")
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.0])
+def test_invalid_receive_limits_are_rejected_before_startup(limit: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        midi.MidiInput("test", receive_byte_limit=limit)  # ty: ignore[invalid-argument-type]
+
+
+@pytest.mark.parametrize("limit", [2, 3])
+def test_receive_byte_limit_is_applied_in_the_child_and_exposes_drops(
+    limit: int, workers: list[Popen[bytes]]
+) -> None:
+    received = Event()
+    source = midi.MidiInput("early", receive_byte_limit=limit)
+    with source.connect(
+        source.ports()[0], "test", lambda t, m: received.set()
+    ) as connection:
+        if limit == 3:
+            assert received.wait(3)
+        assert connection.dropped_messages == (1 if limit == 2 else 0)
+        if limit == 2:
+            assert not received.is_set()
 
 
 def test_partial_thread_startup_failure_terminates_and_reaps_its_child(

@@ -167,12 +167,17 @@ successfully, no callbacks remain active or will be accepted for that connection
 Keep callbacks short. The GIL, OS scheduling, and backend buffers prevent hard
 real-time guarantees or a promise of no loss under load. The example uses an
 application-owned queue. Isolated delivery has two bounded queues, one in each
-process, each holding at most 128 messages. A full queue drops the new message.
+process, each holding at most 128 messages and 8 MiB of message payloads by
+default. Configure `MidiInput(..., receive_byte_limit=8 * 1024 * 1024)` to set
+each stage's positive byte budget. A message that would exceed either limit is
+dropped, including a single message larger than the entire byte budget.
 Read `connection.dropped_messages` for their combined overflow count. Child
 counts arrive with messages/control replies and are current after successful
 close; a crashed worker can lose its final count. This counts queue overflow,
-not driver loss or messages discarded during close. There is no byte-size budget
-or hard throughput guarantee. Native mode reports zero and adds no receive queue.
+not driver loss or messages discarded during close. These budgets bound queued
+payloads, not Python overhead, messages in flight, user-retained messages, or
+unfinished SysEx inside midir. There is no hard throughput guarantee. Native
+mode reports zero, adds no receive queue, and does not apply `receive_byte_limit`.
 Blocking MIDI operations from a callback or its error hook raise `RuntimeError`
 before entering the backend or waiting for a native lock. This includes client
 creation, discovery, metadata, port IDs/comparisons, filter changes, opening,

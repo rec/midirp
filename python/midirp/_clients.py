@@ -11,7 +11,7 @@ from types import TracebackType
 from typing import cast
 
 from . import _native
-from ._transport import Context, Delivery
+from ._transport import DEFAULT_RECEIVE_BYTE_LIMIT, Context, Delivery
 
 
 class MidiInputPort:
@@ -82,11 +82,22 @@ class MidiInput:
     __slots__ = ("_native", "_context")
 
     def __init__(
-        self, client_name: str, *, isolated: bool = True, timeout: float = 5.0
+        self,
+        client_name: str,
+        *,
+        isolated: bool = True,
+        timeout: float = 5.0,
+        receive_byte_limit: int = DEFAULT_RECEIVE_BYTE_LIMIT,
     ) -> None:
         validate_settings(client_name, isolated, timeout)
+        if not isinstance(receive_byte_limit, int) or isinstance(
+            receive_byte_limit, bool
+        ):
+            raise TypeError("receive_byte_limit must be an integer")
+        if receive_byte_limit <= 0:
+            raise ValueError("receive_byte_limit must be positive")
         self._native = None if isolated else _native.MidiInput(client_name)
-        self._context = Context(timeout) if isolated else None
+        self._context = Context(timeout, receive_byte_limit) if isolated else None
         if self._context is not None:
             self._context.request("init", ["input", client_name])
 

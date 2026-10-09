@@ -2,7 +2,7 @@
 
 import pickle
 import sys
-from queue import Empty, Full, Queue
+from queue import Empty, Full
 from threading import Event, Lock, Thread
 from typing import BinaryIO, cast
 
@@ -11,7 +11,7 @@ from . import midi
 
 # isort: split
 from . import _native
-from ._transport import RECEIVE_CAPACITY
+from ._transport import ReceiveQueue
 
 
 class BusyError(RuntimeError):
@@ -30,10 +30,10 @@ class Sender:
 
 
 class Producer:
-    def __init__(self, sender: Sender, generation: int) -> None:
+    def __init__(self, sender: Sender, generation: int, byte_limit: int) -> None:
         self.sender = sender
         self.generation = generation
-        self.messages: Queue[tuple[int, bytes]] = Queue(RECEIVE_CAPACITY)
+        self.messages = ReceiveQueue(byte_limit)
         self.stopped = Event()
         self.dropped = 0
         self.thread = Thread(target=self.emit, daemon=True, name="midirp forwarding")
@@ -115,14 +115,16 @@ class Worker:
             self.client.ignore(_native.Ignore(cast(int, args[0])))
             return None
         if operation == "connect" or operation == "virtual":
-            identifier, name, generation = cast(tuple[str, str, int], tuple(args))
+            identifier, name, generation, byte_limit = cast(
+                tuple[str, str, int, int], tuple(args)
+            )
             if operation == "virtual" and sys.platform == "win32":
                 raise NotImplementedError(
                     "Virtual MIDI ports are not supported on this platform"
                 )
             self.generation = generation
             if isinstance(self.client, _native.MidiInput):
-                self.producer = Producer(self.sender, generation)
+                self.producer = Producer(self.sender, generation, byte_limit)
                 if operation == "virtual":
                     self.connection = self.client.create_virtual(name, self.producer)
                 else:
