@@ -46,7 +46,6 @@ references and function names refer to that pinned source, not a newer release.
 
 | ID | Severity | Evidence | Concern |
 | --- | --- | --- | --- |
-| B2 | Medium | Confirmed in source | Failed ALSA opens can leave queues or ports allocated on the restored client. |
 | B3 | High | Confirmed cleanup gaps; possible unsafe callback | WinMM partial input-open failures lack complete native rollback. |
 | B4 | High | Possible | WinMM reset/requeue lock interaction and failed buffer unpreparation need native fault checks. |
 | B5 | High | Confirmed parser assumption; possible trigger | Truncated CoreMIDI packets can panic in native callback parsing. |
@@ -101,25 +100,6 @@ PyO3's module/GIL behavior, not an assumption that every unsupported build
 either safely works or cleanly fails.
 
 ## Backend-specific exceptional paths
-
-### B2. ALSA failed opens can retain native allocations
-
-**Medium; confirmed in source, accumulation not measured.** Input allocates its
-timestamp queue before validating the remote port and connection name. Returned
-errors on these paths do not free that queue while returning the sequencer to
-the caller. After creating a local input/output port, subscription failure
-returns the client without deleting that port. Repeated failures on a retained
-client can accumulate queues or ports until native client destruction or quota
-exhaustion. Pipe descriptor wrappers do have RAII cleanup; this is not a claim
-that all failed opens leak all allocations.
-
-Queue allocation and initialization also use `unwrap()`, so exhaustion can
-produce a panic rather than `ConnectError`. Some queue start/drain errors are
-ignored, allowing a connection to be returned without confirming all setup.
-
-**Proposed next work:** measure queues/ports before and after repeated stale-port,
-invalid-name, subscription, and allocation failures; investigate upstream
-transactional rollback.
 
 ### B3. WinMM partial initialization lacks complete rollback
 
@@ -186,6 +166,11 @@ callback is not a portable promise of one complete SysEx message. WinMM long
 error notifications and failed buffer requeue are not surfaced as a structured
 Python device-error event. Its four native buffers do not establish a maximum
 whole-message size or a no-loss guarantee.
+
+ALSA queue allocation/initialization uses `unwrap()`, so exhaustion can panic
+instead of returning `ConnectError`. Queue start/drain errors are also ignored,
+allowing an open to succeed without confirming setup. Failed-open disposal does
+not change those upstream behaviors. Native fault checks remain outstanding.
 
 ALSA logs overrun and other reader errors, then continues. Persistent input
 errors can cause repeated work/logging rather than an application-visible
@@ -446,8 +431,7 @@ These are recommendations for future authorized work, not changes made by this
 document. Native fault checks need explicit runtime authorization and selected
 software endpoints or hardware; ordinary CI should not probe arbitrary devices.
 
-1. Address ALSA failed-open allocation rollback and WinMM partial
-   initialization/teardown risks first. Decide whether to contribute upstream
+1. Address WinMM partial initialization/teardown risks first. Decide whether to contribute upstream
    changes or adopt an already verified upstream fix before changing pins.
 2. Investigate allocator aborts, native busy loops, backend failed rollback, and
    unsafe callback boundaries in isolated processes. These are outside the

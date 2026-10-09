@@ -61,7 +61,7 @@ impl MidiOutput {
             .detach(|| native_call("create output", || midir::MidiOutput::new(client_name)))?
             .map_err(|error| InitError::new_err(format!("create output: {error}")))?;
         Ok(Self {
-            state: Arc::new(Client::new(native)),
+            state: Arc::new(Client::new(native, cfg!(target_os = "linux"))),
         })
     }
 
@@ -253,7 +253,7 @@ pub(crate) mod tests {
                 py,
                 Self {
                     connection: Connection::new(),
-                    client: Client::new(()),
+                    client: Client::new((), false),
                     messages: Mutex::new(Vec::new()),
                 },
             )

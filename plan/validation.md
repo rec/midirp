@@ -89,6 +89,39 @@ Rust cases and three isolated finalization cases. Ruff, formatting, ty,
 pyupgrade, Cargo formatting, and Clippy with warnings denied pass. CI is now
 release-only, so this push does not schedule a new cross-platform run.
 
+## ALSA failed-open resource disposal (B2), 2026-10-09
+
+The GitHub workflow was verified to contain only `release: types: [published]`.
+No push, pull-request, or manual-dispatch trigger remains.
+
+Native ALSA input and output clients now use a discard-on-failed-open policy,
+including `isolated=False`. Any native returned opening error disables the client
+before disposing it outside the state lock. Opening retains its `ConnectError`;
+subsequent operations require a fresh client. CoreMIDI/WinMM ordinary returned
+errors keep their existing in-process restoration behavior. Successful close
+still restores healthy clients. No dependency or upstream source was changed.
+
+The pinned ALSA wrapper's `Seq::drop` invokes `snd_seq_close`. The
+[ALSA cleanup contract](https://www.alsa-project.org/alsa-doc/alsa-lib/group___sequencer.html)
+closes the client and releases its resources; it also broadcasts client exit and
+disconnects its routes. The wrapper ignores the close return value, so source
+review and binding tests cannot establish successful OS cleanup under failure.
+
+A device-free regression injects partially allocated queues/ports and the native
+stale-port, invalid-name, port-creation, input-subscription, and output-subscription
+errors. It failed under restoration because allocations survived. Disposal now
+runs once before error return, releases the fixture allocations, and prevents
+reopening. Another test injects a destruction panic and verifies that the original
+opening error survives and the client stays disabled. Native ALSA resource counts,
+thread exhaustion, and close failures remain unmeasured on this Mac. Queue setup
+panics/ignored errors remain listed under B6 rather than being marked fixed.
+
+Local verification passes all 59 Python checks and 39 ordinary Rust cases plus
+three isolated finalization cases through the Python lifecycle harness. Cargo
+formatting, Clippy with warnings denied, Ruff, Python formatting, ty, pyupgrade,
+and the scoped diff check pass. The release-only workflow was also verified
+against GitHub's current default-branch file and its sole active workflow.
+
 ## CI and artifacts
 
 The [CI workflow](../.github/workflows/ci.yml) has 16 combinations: CPython

@@ -13,6 +13,7 @@ use crate::errors::{failed_error, native_call, report_failure, ConnectError, Sen
 pub struct Client<T> {
     state: Mutex<ClientState<T>>,
     failed: AtomicBool,
+    discard_failed_opens: bool,
 }
 
 /// Serializes native teardown and separately publishes completed closure.
@@ -23,10 +24,11 @@ pub struct Connection<T> {
 }
 
 impl<T> Client<T> {
-    pub fn new(native: T) -> Self {
+    pub fn new(native: T, discard_failed_opens: bool) -> Self {
         Self {
             state: Mutex::new(ClientState::Available(native)),
             failed: AtomicBool::new(false),
+            discard_failed_opens,
         }
     }
 
@@ -81,15 +83,28 @@ impl<T> Client<T> {
             Ok(Err(error)) => {
                 let message = format!("connect: {error}");
                 let mut state = self.lock_state()?;
-                // midir 0.11.0 returns an ALSA input client without its
-                // sequencer on this error, from both connect and virtual open.
-                if matches!(
-                    error.kind(),
-                    midir::ConnectErrorKind::Other("could not start ALSA input handler thread")
-                ) {
+                // ALSA can retain partial allocations on returned errors.
+                // The thread-start error also returns a client without a
+                // sequencer, including when exercised by device-free tests.
+                if self.discard_failed_opens
+                    || matches!(
+                        error.kind(),
+                        midir::ConnectErrorKind::Other("could not start ALSA input handler thread")
+                    )
+                {
                     self.failed.store(true, Ordering::Release);
+                    *state = ClientState::Closing;
+                    drop(state);
+                    if native_call("failed-open client destruction", || {
+                        drop(error.into_inner())
+                    })
+                    .is_err()
+                    {
+                        report_failure("native failed-open client destruction panicked");
+                    }
+                } else {
+                    *state = ClientState::Available(error.into_inner());
                 }
-                *state = ClientState::Available(error.into_inner());
                 Err(ConnectError::new_err(message))
             }
             Err(error) => {
@@ -239,6 +254,7 @@ enum ClientState<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
@@ -249,7 +265,7 @@ mod tests {
     fn panicking_connect_disables_the_client_and_a_fresh_client_still_works() {
         Python::initialize();
         Python::attach(|py| {
-            let client = Client::new(37);
+            let client = Client::new(37, false);
             let connection = Connection::<i32>::new();
             let error = client
                 .connect(&connection, |_| panic!("connect fault"))
@@ -266,7 +282,7 @@ mod tests {
             assert!(connection
                 .close(&client, |_| panic!("no native handle survived"))
                 .is_err());
-            let fresh = Client::new(19);
+            let fresh = Client::new(19, false);
             let reopened = Connection::new();
             fresh.connect(&reopened, Ok).unwrap();
             reopened.close(&fresh, |value| value).unwrap();
@@ -284,7 +300,7 @@ mod tests {
         }
         Python::initialize();
         Python::attach(|py| {
-            let client = Client::new(Native);
+            let client = Client::new(Native, false);
             let result: PyResult<()> = client.with_available(|_| panic!("metadata fault"));
             assert!(result.unwrap_err().is_instance_of::<PyRuntimeError>(py));
             assert!(client
@@ -298,7 +314,7 @@ mod tests {
     fn send_panic_allows_teardown_but_permanently_disables_connection_and_client() {
         Python::initialize();
         Python::attach(|py| {
-            let client = Client::new(37);
+            let client = Client::new(37, false);
             let connection = Connection::new();
             client.connect(&connection, Ok).unwrap();
             let error = connection
@@ -333,7 +349,7 @@ mod tests {
     fn teardown_panic_consumes_ownership_once_and_reports_failed_state() {
         Python::initialize();
         Python::attach(|py| {
-            let client = Client::new(37);
+            let client = Client::new(37, false);
             let connection = Connection::new();
             client.connect(&connection, Ok).unwrap();
             let error = connection
@@ -352,7 +368,7 @@ mod tests {
     fn alsa_thread_start_failure_disables_client_before_any_native_reuse() {
         Python::initialize();
         Python::attach(|py| {
-            let client = Client::new(Some(Box::new(37)));
+            let client = Client::new(Some(Box::new(37)), false);
             let connection: Connection<Option<Box<i32>>> = Connection::new();
             let error = client
                 .connect(&connection, |mut native| {
@@ -394,7 +410,7 @@ mod tests {
                 .close(&client, |_| panic!("failed open has no native connection"))
                 .unwrap();
 
-            let fresh = Client::new(Some(Box::new(19)));
+            let fresh = Client::new(Some(Box::new(19)), false);
             let reopened = Connection::new();
             fresh.connect(&reopened, Ok).unwrap();
             reopened.close(&fresh, |native| native).unwrap();
@@ -408,8 +424,114 @@ mod tests {
     }
 
     #[test]
+    fn failed_alsa_opens_release_partial_allocations_without_client_reuse() {
+        struct Sequencer {
+            allocated: usize,
+            live: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for Sequencer {
+            fn drop(&mut self) {
+                self.live.fetch_sub(self.allocated, Ordering::SeqCst);
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        Python::initialize();
+        Python::attach(|py| {
+            for (kind, allocated) in [
+                (midir::ConnectErrorKind::InvalidPort, 1),
+                (
+                    midir::ConnectErrorKind::Other("port_name must not contain null bytes"),
+                    1,
+                ),
+                (
+                    midir::ConnectErrorKind::Other("could not create ALSA input port"),
+                    1,
+                ),
+                (
+                    midir::ConnectErrorKind::Other("could not create ALSA input subscription"),
+                    2,
+                ),
+                (
+                    midir::ConnectErrorKind::Other("could not create ALSA output subscription"),
+                    1,
+                ),
+            ] {
+                let live = Arc::new(AtomicUsize::new(0));
+                let drops = Arc::new(AtomicUsize::new(0));
+                let client = Client::new(
+                    Sequencer {
+                        allocated: 0,
+                        live: Arc::clone(&live),
+                        drops: Arc::clone(&drops),
+                    },
+                    true,
+                );
+                let connection: Connection<()> = Connection::new();
+                let error = client
+                    .connect(&connection, |mut native| {
+                        native.allocated = allocated;
+                        live.fetch_add(allocated, Ordering::SeqCst);
+                        Err(midir::ConnectError::new(kind, native))
+                    })
+                    .unwrap_err();
+                assert!(error.is_instance_of::<ConnectError>(py));
+                assert_eq!(error.value(py).to_string(), format!("connect: {kind}"));
+                assert_eq!(
+                    live.load(Ordering::SeqCst),
+                    0,
+                    "partial allocations survived failed open"
+                );
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                let mut reused = false;
+                let result = client.connect(&Connection::<()>::new(), |_| {
+                    reused = true;
+                    Ok(())
+                });
+                assert!(!reused);
+                assert!(result.unwrap_err().is_instance_of::<PyRuntimeError>(py));
+                assert!(client.with_available(|_| Ok(())).is_err());
+                assert!(connection.closed());
+                connection
+                    .close(&client, |_| panic!("failed open never connected"))
+                    .unwrap();
+                drop(client);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn failed_open_cleanup_panic_preserves_connect_error_and_blocks_client_reuse() {
+        struct Sequencer;
+        impl Drop for Sequencer {
+            fn drop(&mut self) {
+                panic!("sequencer close fault");
+            }
+        }
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Client::new(Sequencer, true);
+            let connection: Connection<()> = Connection::new();
+            let error = client
+                .connect(&connection, |native| {
+                    Err(midir::ConnectError::new(
+                        midir::ConnectErrorKind::InvalidPort,
+                        native,
+                    ))
+                })
+                .unwrap_err();
+            assert!(error.is_instance_of::<ConnectError>(py));
+            assert_eq!(error.value(py).to_string(), "connect: invalid port");
+            assert!(client.with_available(|_| Ok(())).is_err());
+            assert!(connection.closed());
+            drop(client); // Must not retry destruction of the consumed handle.
+        });
+    }
+
+    #[test]
     fn failed_connect_restores_the_same_client() {
-        let client = Client::new(Box::new(37));
+        let client = Client::new(Box::new(37), false);
         let identity = client
             .with_available(|native| Ok(&**native as *const i32))
             .unwrap();
@@ -441,7 +563,7 @@ mod tests {
 
     #[test]
     fn closing_restores_the_client_and_allows_a_new_connection() {
-        let client = Client::new(Box::new(37));
+        let client = Client::new(Box::new(37), true);
         let connection = Connection::new();
         client.connect(&connection, Ok).unwrap();
         assert!(!connection.closed());
@@ -469,7 +591,7 @@ mod tests {
 
     #[test]
     fn concurrent_close_waits_for_native_teardown() {
-        let client = Arc::new(Client::new(37));
+        let client = Arc::new(Client::new(37, false));
         let connection = Arc::new(Connection::new());
         client.connect(&connection, Ok).unwrap();
         let (started_tx, started_rx) = mpsc::channel();
@@ -515,7 +637,7 @@ mod tests {
 
     #[test]
     fn concurrent_client_operations_reject_use_without_waiting_for_the_backend() {
-        let client = Client::new(37);
+        let client = Client::new(37, false);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
@@ -558,7 +680,7 @@ mod tests {
 
     #[test]
     fn closed_reports_without_waiting_and_remains_false_until_teardown_completes() {
-        let client = Client::new(37);
+        let client = Client::new(37, false);
         let connection = Connection::new();
         client.connect(&connection, Ok).unwrap();
         let (started_tx, started_rx) = mpsc::channel();
@@ -588,7 +710,7 @@ mod tests {
 
     #[test]
     fn input_filter_configuration_survives_failed_connect_and_close() {
-        let client = Client::new(midir::Ignore::None);
+        let client = Client::new(midir::Ignore::None, false);
         let connection = Connection::new();
         assert_eq!(
             client.with_available(|native| Ok(*native)).unwrap(),
@@ -639,7 +761,7 @@ mod tests {
     fn send_preserves_bytes_and_native_errors_without_closing_the_connection() {
         Python::initialize();
         Python::attach(|py| {
-            let client = Client::new(Vec::<Vec<u8>>::new());
+            let client = Client::new(Vec::<Vec<u8>>::new(), false);
             let connection = Connection::new();
             client.connect(&connection, Ok).unwrap();
             for bytes in [vec![], vec![0], vec![0x90, 60, 127], vec![0xf0, 0, 1, 0xf7]] {
@@ -698,7 +820,7 @@ mod tests {
     fn an_open_snapshot_does_not_reserve_the_connection_against_another_closer() {
         Python::initialize();
         Python::attach(|py| {
-            let client = Client::new(37);
+            let client = Client::new(37, false);
             let connection = Connection::new();
             client.connect(&connection, Ok).unwrap();
             assert!(!connection.closed());
@@ -727,7 +849,7 @@ mod tests {
     fn close_waits_for_a_send_in_progress_while_python_is_released() {
         Python::initialize();
         Python::attach(|py| {
-            let client = Client::new(Vec::<u8>::new());
+            let client = Client::new(Vec::<u8>::new(), false);
             let connection = Connection::new();
             client.connect(&connection, Ok).unwrap();
             let (started, sending) = mpsc::channel();

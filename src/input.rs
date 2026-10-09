@@ -54,7 +54,7 @@ impl MidiInput {
             .detach(|| native_call("create input", || midir::MidiInput::new(client_name)))?
             .map_err(|error| InitError::new_err(format!("create input: {error}")))?;
         Ok(Self {
-            state: Arc::new(Client::new(native)),
+            state: Arc::new(Client::new(native, cfg!(target_os = "linux"))),
         })
     }
 

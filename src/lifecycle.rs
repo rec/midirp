@@ -384,9 +384,11 @@ mod tests {
         let runtime = Runtime::start().unwrap();
         let mut failed = Vec::new();
         for _ in 0..CLEANUP_WORKERS {
-            let resource = Arc::new(Managed::new(Arc::new(Client::new(37)), None, |_: i32| {
-                panic!("native teardown fault")
-            }));
+            let resource = Arc::new(Managed::new(
+                Arc::new(Client::new(37, false)),
+                None,
+                |_: i32| panic!("native teardown fault"),
+            ));
             runtime.register(resource.clone()).unwrap();
             resource.connect(Ok).unwrap();
             runtime.enqueue(resource.clone());
@@ -394,7 +396,7 @@ mod tests {
         }
         let (finished, finishing) = mpsc::channel();
         let healthy = Arc::new(Managed::new(
-            Arc::new(Client::new(19)),
+            Arc::new(Client::new(19, false)),
             None,
             |native: (i32, mpsc::Sender<()>)| {
                 native.1.send(()).unwrap();
@@ -423,7 +425,7 @@ mod tests {
     fn poisoned_lifecycle_retains_native_ownership_and_its_capacity_reservation() {
         let runtime = Runtime::start().unwrap();
         let resource = Arc::new(Managed::new(
-            Arc::new(Client::new(37)),
+            Arc::new(Client::new(37, false)),
             None,
             |value: i32| value,
         ));
@@ -439,7 +441,7 @@ mod tests {
         let mut resources = Vec::new();
         for _ in 1..CONNECTION_CAPACITY {
             let next = Arc::new(Managed::new(
-                Arc::new(Client::new(19)),
+                Arc::new(Client::new(19, false)),
                 None,
                 |value: i32| value,
             ));
@@ -447,7 +449,7 @@ mod tests {
             resources.push(next);
         }
         let next = Arc::new(Managed::new(
-            Arc::new(Client::new(19)),
+            Arc::new(Client::new(19, false)),
             None,
             |value: i32| value,
         ));
@@ -466,7 +468,7 @@ mod tests {
         let (started, starting) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let blocked = Arc::new(Managed::new(
-            Arc::new(Client::new(37)),
+            Arc::new(Client::new(37, false)),
             None,
             |native: (i32, mpsc::Sender<()>, mpsc::Receiver<()>)| {
                 native.1.send(()).unwrap();
@@ -482,7 +484,7 @@ mod tests {
         starting.recv_timeout(Duration::from_secs(5)).unwrap();
         let (finished, finishing) = mpsc::channel();
         let other = Arc::new(Managed::new(
-            Arc::new(Client::new(19)),
+            Arc::new(Client::new(19, false)),
             None,
             |native: (i32, mpsc::Sender<()>)| {
                 native.1.send(()).unwrap();
@@ -509,7 +511,7 @@ mod tests {
         let mut resources = Vec::new();
         for _ in 0..CONNECTION_CAPACITY {
             let resource = Arc::new(Managed::new(
-                Arc::new(Client::new(37)),
+                Arc::new(Client::new(37, false)),
                 None,
                 |native: i32| native,
             ));
@@ -518,7 +520,7 @@ mod tests {
             resources.push(resource);
         }
         let next = Arc::new(Managed::new(
-            Arc::new(Client::new(19)),
+            Arc::new(Client::new(19, false)),
             None,
             |native: i32| native,
         ));
@@ -540,7 +542,7 @@ mod tests {
     fn completed_cleanup_releases_capacity_while_python_resources_remain_alive() {
         let runtime = Runtime::start().unwrap();
         let resource = Arc::new(Managed::new(
-            Arc::new(Client::new(37)),
+            Arc::new(Client::new(37, false)),
             None,
             |native: i32| native,
         ));
@@ -556,7 +558,7 @@ mod tests {
         let mut resources = Vec::new();
         for _ in 0..CONNECTION_CAPACITY {
             let next = Arc::new(Managed::new(
-                Arc::new(Client::new(19)),
+                Arc::new(Client::new(19, false)),
                 None,
                 |native: i32| native,
             ));
@@ -577,7 +579,7 @@ mod tests {
         for _ in 0..CLEANUP_WORKERS {
             let (release, released) = mpsc::channel();
             let resource = Arc::new(Managed::new(
-                Arc::new(Client::new(())),
+                Arc::new(Client::new((), false)),
                 None,
                 |native: (mpsc::Sender<()>, mpsc::Receiver<()>)| {
                     native.0.send(()).unwrap();
@@ -597,7 +599,11 @@ mod tests {
         }
         let mut pending = Vec::new();
         for _ in CLEANUP_WORKERS..CONNECTION_CAPACITY {
-            let resource = Arc::new(Managed::new(Arc::new(Client::new(())), None, |()| ()));
+            let resource = Arc::new(Managed::new(
+                Arc::new(Client::new((), false)),
+                None,
+                |()| {},
+            ));
             runtime.register(resource.clone()).unwrap();
             resource.connect(Ok).unwrap();
             runtime.enqueue(resource.clone());
@@ -605,7 +611,11 @@ mod tests {
             runtime.enqueue(resource.clone());
             pending.push(resource);
         }
-        let next = Arc::new(Managed::new(Arc::new(Client::new(())), None, |()| ()));
+        let next = Arc::new(Managed::new(
+            Arc::new(Client::new((), false)),
+            None,
+            |()| {},
+        ));
         let result = runtime.register(next.clone());
         for release in releases {
             release.send(()).unwrap();
@@ -618,7 +628,7 @@ mod tests {
 
     #[test]
     fn teardown_before_native_open_prevents_late_connection_creation() {
-        let client = Arc::new(Client::new(37));
+        let client = Arc::new(Client::new(37, false));
         let resource = Managed::new(Arc::clone(&client), None, |native: i32| native);
         resource.close().unwrap();
         assert!(resource
@@ -630,7 +640,7 @@ mod tests {
     #[test]
     fn teardown_waits_for_an_open_in_progress_and_restores_the_client() {
         use std::time::Duration;
-        let client = Arc::new(Client::new(37));
+        let client = Arc::new(Client::new(37, false));
         let resource = Managed::new(Arc::clone(&client), None, |native: i32| native);
         let (started, opening) = mpsc::channel();
         let (release, released) = mpsc::channel();
@@ -675,10 +685,11 @@ mod tests {
             pyo3::with_embedded_python_interpreter(|py| {
                 initialize(py).unwrap();
                 for _ in 0..CLEANUP_WORKERS {
-                    let resource =
-                        Arc::new(Managed::new(Arc::new(Client::new(37)), None, |_: i32| {
-                            panic!("finalization teardown fault")
-                        }));
+                    let resource = Arc::new(Managed::new(
+                        Arc::new(Client::new(37, false)),
+                        None,
+                        |_: i32| panic!("finalization teardown fault"),
+                    ));
                     register(resource.clone()).unwrap();
                     resource.connect(Ok).unwrap();
                     resources.push(resource);
@@ -696,7 +707,7 @@ mod tests {
             pyo3::with_embedded_python_interpreter(|py| {
                 initialize(py).unwrap();
                 let resource = Arc::new(Managed::new(
-                    Arc::new(Client::new(37)),
+                    Arc::new(Client::new(37, false)),
                     None,
                     |native: i32| native,
                 ));

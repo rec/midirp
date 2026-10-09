@@ -16,7 +16,7 @@ class PortInfoError(MidiError):
     """Port information could not be retrieved."""
 
 class ConnectError(MidiError):
-    """Open failed; isolation and ALSA thread-start failure disable the client."""
+    """Failed native opens disable isolated and ALSA clients."""
 
 class SendError(MidiError):
     """A MIDI message could not be sent."""

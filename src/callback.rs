@@ -287,7 +287,7 @@ mod tests {
         lifecycle::initialize(py).unwrap();
         let callback = Arc::new(Callback::new(py, callable.clone().unbind()).unwrap());
         let resource = Arc::new(Managed::new(
-            Arc::new(Client::new(())),
+            Arc::new(Client::new((), false)),
             Some(Arc::clone(&callback)),
             |native: NativeThread| {
                 native.commands.send(Command::Stop).unwrap();
@@ -380,7 +380,7 @@ mod tests {
             let recorder = fixtures(py).getattr("Recorder").unwrap().call0().unwrap();
             let callback = Arc::new(Callback::new(py, recorder.clone().unbind()).unwrap());
             let resource = Managed::new(
-                Arc::new(Client::new(())),
+                Arc::new(Client::new((), false)),
                 Some(Arc::clone(&callback)),
                 |()| (),
             );
@@ -751,9 +751,9 @@ mod tests {
     fn callback_rejects_discovery_configuration_and_opening_before_native_work() {
         Python::initialize();
         Python::attach(|py| {
-            let client = Client::new(37);
+            let client = Client::new(37, false);
             let connection = crate::state::Connection::<i32>::new();
-            let resource = Managed::new(Arc::new(Client::new(19)), None, |value: i32| value);
+            let resource = Managed::new(Arc::new(Client::new(19, false)), None, |value: i32| value);
             let _callback = CallbackThread::enter();
             let discovery: PyResult<()> = client.with_available(|_| panic!("must not enumerate"));
             let configure: PyResult<()> = client.with_available(|_| panic!("must not configure"));
@@ -783,7 +783,7 @@ mod tests {
                 .unwrap();
             let callback = Arc::new(Callback::new(py, recorder.clone().unbind()).unwrap());
             let resource = Arc::new(Managed::new(
-                Arc::new(Client::new(())),
+                Arc::new(Client::new((), false)),
                 Some(Arc::clone(&callback)),
                 |()| (),
             ));

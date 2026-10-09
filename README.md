@@ -170,8 +170,10 @@ and choose an explicit queue overflow policy.
 The default filter is `Ignore.NONE`. Combine `SYSEX`, `TIME`, and `ACTIVE_SENSE`
 with `|`. `Ignore.ALL` combines these three filters; note messages still arrive.
 `Ignore(bits)` accepts integer masks 0–7; `int(flags)` returns the mask. Configure
-filters before connecting. Configuration survives successful close. In-process
-ordinary failed opens preserve configuration subject to upstream rollback defects.
+filters before connecting. Configuration survives successful close. Failed native
+opens disable isolated and ALSA clients, so configure a fresh client after failure.
+In-process CoreMIDI/WinMM ordinary returned errors preserve configuration subject
+to upstream rollback defects.
 
 ## Virtual ports
 
@@ -206,11 +208,12 @@ A connection owns its native resource and keeps its original Python client alive
 While connecting, connected, or closing, that client rejects other operations.
 Concurrent discovery, metadata, or configuration on the same client raises
 `RuntimeError` immediately if another client operation is in progress.
-Isolated failed native opens invalidate the client. In-process ordinary failed
-opens restore the same native client, subject to upstream rollback defects.
-ALSA input handler thread-start failure permanently disables its client even
-in-process: the opening call raises `ConnectError`; subsequent client operations
-raise `RuntimeError` requiring a new client.
+Failed native opens invalidate isolated clients and in-process ALSA clients.
+ALSA's returned client is disposed before the opening call raises `ConnectError`,
+including partial queues/ports; subsequent client operations raise `RuntimeError`
+requiring a new client. In-process CoreMIDI/WinMM ordinary returned errors restore
+the same client, subject to upstream rollback defects. Native cleanup can still
+stall in in-process mode; its timeout does not cancel a driver.
 Successful `close()` is synchronous and idempotent, restores the client for
 reuse, and waits for concurrent teardown.
 `closed` is a nonblocking ownership-state snapshot. It remains false during
