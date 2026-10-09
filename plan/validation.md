@@ -252,6 +252,15 @@ Device-free checks exercise both opening methods and both modes for incompatible
 signatures, plus valid callable objects, partials, and uninspectable callables.
 All 83 Python checks, Ruff, formatting, ty, pyupgrade, and the scoped diff check pass.
 
+## Context body and cleanup failures (A2), 2026-10-09
+
+Public input/output context managers preserve simultaneous body and close errors
+in an exception group, ordered body then close. Interrupts use BaseExceptionGroup;
+ordinary errors use ExceptionGroup. Without a body error, close errors retain
+their original exception type. Device-free checks cover both directions, both
+modes, ordinary body errors, interrupts, and isolated close timeouts.
+All 91 Python checks, Ruff, formatting, ty, pyupgrade, and the scoped diff check pass.
+
 ## Native backend checks
 
 `test/manual/loopback.py` explicitly selects unique temporary software endpoints

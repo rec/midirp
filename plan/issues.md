@@ -373,8 +373,8 @@ not a claim to bind every optional Rust feature or backend.
   `RuntimeError`, Windows `NotImplementedError`, Python callback exceptions, or
   every native panic/allocation failure. Native error messages are not a stable
   structured error taxonomy for recovery decisions.
-- Context-manager exit waits for close. Exceptional teardown can block or
-  replace the exception raised by the context body. Idempotence is a normal
+- Context-manager exit waits for close. Exceptional teardown can block.
+  Idempotence is a normal
   successful-teardown property, not a driver-failure recovery guarantee.
 
 ### A3. Callback traps

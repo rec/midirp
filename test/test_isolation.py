@@ -11,6 +11,7 @@ from queue import Queue
 from subprocess import Popen
 from threading import Event, Thread
 from time import monotonic, sleep
+from typing import Self
 from unittest.mock import patch
 
 import pytest
@@ -214,6 +215,63 @@ def test_native_close_timeout_consumes_parent_ownership_without_restoring_a_clie
     workers[0].wait(timeout=3)
     with pytest.raises(RuntimeError, match="new client"):
         output.ports()
+
+
+@pytest.mark.parametrize("isolated", [True, False])
+@pytest.mark.parametrize("direction", ["input", "output"])
+@pytest.mark.parametrize("interrupt", [True, False])
+def test_context_exit_preserves_body_and_close_failures(
+    isolated: bool, direction: str, interrupt: bool, workers: list[Popen[bytes]]
+) -> None:
+    class LocalConnection:
+        closed = False
+
+        def __enter__(self) -> Self:
+            return self
+
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    class LocalClient:
+        def __init__(self, name: str) -> None:
+            pass
+
+        def ports(self) -> list[object]:
+            return [object()]
+
+        def connect(
+            self,
+            port: object,
+            name: str,
+            callback: Callable[[int, bytes], object] | None = None,
+        ) -> LocalConnection:
+            return LocalConnection()
+
+    with (
+        patch("midirp._native.MidiInput", LocalClient),
+        patch("midirp._native.MidiOutput", LocalClient),
+    ):
+        if direction == "input":
+            source = midi.MidiInput("hang_close", isolated=isolated, timeout=0.5)
+            connection = source.connect(source.ports()[0], "test", lambda t, m: None)
+        else:
+            output = midi.MidiOutput("hang_close", isolated=isolated, timeout=0.5)
+            connection = output.connect(output.ports()[0], "test")
+        body_error = (
+            KeyboardInterrupt("body interrupted")
+            if interrupt
+            else ValueError("body failed")
+        )
+        with pytest.raises(BaseExceptionGroup) as caught:
+            with connection:
+                raise body_error
+        assert caught.value.exceptions[0] is body_error
+        assert isinstance(
+            caught.value.exceptions[1], TimeoutError if isolated else RuntimeError
+        )
+        assert isinstance(
+            caught.value, BaseExceptionGroup if interrupt else ExceptionGroup
+        )
 
 
 def test_failed_open_discards_the_worker_instead_of_restoring_a_suspect_native_client(

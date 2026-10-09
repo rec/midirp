@@ -240,8 +240,11 @@ reuse, and waits for concurrent teardown.
 `closed` is a nonblocking ownership-state snapshot. It remains false during
 teardown and becomes true after client restoration; it does not report device
 health. An isolated worker failure also makes `closed` true.
-Context-manager exit closes the connection
-and propagates body exceptions. Handles cannot be constructed directly.
+Context-manager exit closes the connection and propagates body exceptions.
+If both the body and close fail, it raises an `ExceptionGroup` containing the
+body error first and the close error second. Interrupts produce a
+`BaseExceptionGroup` instead. A close error without a body error is raised
+directly. Handles cannot be constructed directly.
 
 Reading `closed` or entering a context manager does not reserve the connection
 against another thread closing it immediately afterward. Call `send()` directly

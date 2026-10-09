@@ -352,7 +352,7 @@ class MidiInputConnection:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        close_context(self, exc_value)
 
     def __del__(self) -> None:
         if hasattr(self, "_delivery") and self._delivery is not None:
@@ -424,12 +424,27 @@ class MidiOutputConnection:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        close_context(self, exc_value)
 
     def __del__(self) -> None:
         if hasattr(self, "_client") and self._native is None and not self._closed:
             assert self._client._context is not None
             self._client._context.defer_close(self._generation)
+
+
+def close_context(
+    connection: MidiInputConnection | MidiOutputConnection,
+    body_error: BaseException | None,
+) -> None:
+    try:
+        connection.close()
+    except BaseException as close_error:
+        # Preserve interrupts as well as ordinary exceptions from either phase.
+        if body_error is None:
+            raise
+        raise BaseExceptionGroup(
+            "MIDI context body and close both failed", [body_error, close_error]
+        ) from None
 
 
 def validate_settings(name: str, isolated: bool, timeout: float) -> None:
