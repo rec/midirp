@@ -208,6 +208,19 @@ CPython, not a native free-threaded build or concurrency support.
 All 74 Python checks, Cargo formatting, Clippy with warnings denied, Ruff,
 Python formatting, ty, pyupgrade, and the scoped diff check pass.
 
+## Bounded receive examples (R2), 2026-10-09
+
+Both README receive examples now use a single-slot application queue and
+nonblocking insertion. When occupied, they discard the newest message; each
+example only needs its first received message. The callback cannot wait for
+the consumer to free queue capacity, including during connection close.
+This removes the examples' unbounded application buffering without changing
+the library API or imposing a policy on applications. The remaining native
+SysEx and library resource limits stay in the issue inventory.
+
+Documentation review and the scoped diff check pass. No Python or data file
+changed, so the test suite was not rerun for this documentation-only commit.
+
 ## Native backend checks
 
 `test/manual/loopback.py` explicitly selects unique temporary software endpoints

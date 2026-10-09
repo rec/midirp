@@ -111,14 +111,17 @@ sending and closing when message order matters.
 ## Receive messages
 
 ```python
-from queue import Queue
+from queue import Full, Queue
 from midirp import midi
 
 def receive_one(port_id: str) -> tuple[int, bytes]:
-    messages: Queue[tuple[int, bytes]] = Queue()
+    messages: Queue[tuple[int, bytes]] = Queue(maxsize=1)
 
     def receive(timestamp: int, message: bytes) -> None:
-        messages.put((timestamp, message))
+        try:
+            messages.put_nowait((timestamp, message))
+        except Full:
+            pass  # Only the first waiting message is needed.
 
     source = midi.MidiInput("input example")
     source.ignore(midi.Ignore.TIME | midi.Ignore.ACTIVE_SENSE)
@@ -147,7 +150,9 @@ Initialize all state used by the callback before calling `connect()` or
 `create_virtual()`. Delivery may start during native opening, before the call
 returns and its result is assigned. The callback must not depend on the variable
 receiving that connection. The queue examples initialize their callback state
-before opening and hand messages to the controlling thread.
+before opening and hand messages to the controlling thread. Each example waits
+for one message, keeps at most one queued message, and discards new messages
+while that slot is occupied. Its callback never waits for queue capacity.
 
 Explicit close stops accepting deliveries, rechecks delivery eligibility after
 waiting for Python, and waits for already admitted deliveries to finish. An
@@ -189,14 +194,17 @@ On macOS and Linux, a virtual input receives data from other clients, while a
 virtual output sends data to other clients' inputs:
 
 ```python
-from queue import Queue
+from queue import Full, Queue
 from midirp import midi
 
 def receive_virtual() -> tuple[int, bytes]:
-    messages: Queue[tuple[int, bytes]] = Queue()
+    messages: Queue[tuple[int, bytes]] = Queue(maxsize=1)
 
     def receive(timestamp: int, message: bytes) -> None:
-        messages.put((timestamp, message))
+        try:
+            messages.put_nowait((timestamp, message))
+        except Full:
+            pass  # Only the first waiting message is needed.
 
     source = midi.MidiInput("virtual example")
     with source.create_virtual("example input", receive):
