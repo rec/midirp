@@ -290,6 +290,32 @@ translate unreported backend events or infer device diagnoses from native text.
 All 104 Python checks, Rust formatting, Clippy with warnings denied, Ruff,
 Python formatting, ty, pyupgrade, and the scoped diff check pass.
 
+## Worker failure and input activity observations (D1), 2026-10-09
+
+Clients and connections expose worker_failure, retaining the first known worker
+failure's type and arguments without its traceback. Fatal replies are recorded
+before subsequent EOF can obscure their native error category. In-process mode
+has no worker and reports None. No automatic reconnection or device-health
+diagnosis was added.
+
+Input last_message_time records Python monotonic seconds when callback delivery
+starts, before application code, and survives close. Native and parent delivery
+reuse the existing Rust callback gate, preserving the original callable in
+sys.unraisablehook. The captured clock reference is GC-visible and released
+outside the state lock during retirement. Queued/dropped messages do not advance
+the observation. Device-free checks cover quiet input, early delivery, both
+modes, callback error context, worker crash/timeout/native errors, and detached
+failure tracebacks.
+All 108 repository Python checks, Rust formatting, Clippy with warnings denied,
+Ruff, Python formatting, ty, pyupgrade, and the scoped diff check pass. The
+CPython 3.11 arm64 wheel rebuilt from the sdist passes both archive checks and
+107 installed-wheel checks from outside the checkout. Ten focused, previously
+authorized CoreMIDI virtual-port checks pass in both modes: successful/context
+close, 128/1,024/16,384-byte SysEx including activity observations, and ordered
+bursts. No hardware was used. These results do not establish WinMM/ALSA native
+fault behavior, an upstream SysEx assembly bound, or device health. Release-only
+CI remains unchanged and this push schedules no cross-platform run.
+
 ## Native backend checks
 
 `test/manual/loopback.py` explicitly selects unique temporary software endpoints

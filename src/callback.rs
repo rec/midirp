@@ -40,6 +40,11 @@ impl CallbackBridge {
         py.detach(|| self.callback.drain())
     }
 
+    #[getter]
+    fn last_message_time(&self) -> Option<f64> {
+        self.callback.last_message_time()
+    }
+
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.callback.traverse(visit)
     }
@@ -69,6 +74,8 @@ impl Callback {
         Ok(Self {
             state: Mutex::new(DispatchState {
                 callable: Some(callable),
+                clock: Some(PyModule::import(py, "time")?.getattr("monotonic")?.unbind()),
+                last_message_time: None,
                 accepting: true,
                 active: 0,
             }),
@@ -90,19 +97,37 @@ impl Callback {
         // The shutdown registry disables and drains this gate before finalization.
         Python::try_attach(|py| {
             let _thread = CallbackThread::enter();
-            let callable = {
+            let (callable, clock) = {
                 let state = self.recover(self.state.lock());
                 // Close may have started while this thread waited for the GIL.
                 if !state.accepting {
                     return;
                 }
-                state
-                    .callable
-                    .as_ref()
-                    .expect("open callback missing")
-                    .clone_ref(py)
+                (
+                    state
+                        .callable
+                        .as_ref()
+                        .expect("open callback missing")
+                        .clone_ref(py),
+                    state
+                        .clock
+                        .as_ref()
+                        .expect("open callback clock missing")
+                        .clone_ref(py),
+                )
             };
             let callable = callable.bind(py);
+            match clock
+                .bind(py)
+                .call0()
+                .and_then(|value| value.extract::<f64>())
+            {
+                Ok(time) => self.recover(self.state.lock()).last_message_time = Some(time),
+                Err(error) => {
+                    error.write_unraisable(py, Some(callable));
+                    return;
+                }
+            }
             let bytes = PyBytes::new(py, message);
             if let Err(error) = callable.call1((timestamp, bytes)) {
                 error.write_unraisable(py, Some(callable));
@@ -112,14 +137,19 @@ impl Callback {
 
     pub fn traverse(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         let state = self.recover(self.state.lock());
-        visit.call(&state.callable)
+        visit.call(&state.callable)?;
+        visit.call(&state.clock)
+    }
+
+    pub fn last_message_time(&self) -> Option<f64> {
+        self.recover(self.state.lock()).last_message_time
     }
 
     pub fn retire(&self) {
         let retired = {
             let mut state = self.recover(self.state.lock());
             state.accepting = false;
-            state.callable.take()
+            (state.callable.take(), state.clock.take())
         };
         // Decref can invoke arbitrary Python destructors. Never do it under a lock.
         drop(retired);
@@ -167,6 +197,8 @@ pub fn check_blocking_thread() -> PyResult<()> {
 
 struct DispatchState {
     callable: Option<Py<PyAny>>,
+    clock: Option<Py<PyAny>>,
+    last_message_time: Option<f64>,
     accepting: bool,
     active: usize,
 }

@@ -164,6 +164,14 @@ impl MidiInputConnection {
         py.detach(|| self.resource.native.closed())
     }
 
+    #[getter]
+    fn last_message_time(&self) -> Option<f64> {
+        self.resource
+            .callback
+            .as_ref()
+            .and_then(|callback| callback.last_message_time())
+    }
+
     fn __enter__(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<Self>> {
         slf.get().resource.native.check_failed()?;
         if slf.get().closed(py) {

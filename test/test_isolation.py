@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 from midirp import midi
+from midirp._native import CallbackBridge
 from midirp._transport import (
     RECEIVE_CAPACITY,
     Context,
@@ -192,6 +193,10 @@ def test_native_failure_invalidates_only_its_worker_and_requires_a_fresh_client(
         bad_connection.send(b"\xf8")
     assert monotonic() - started < 3
     assert bad_connection.closed
+    assert isinstance(broken.worker_failure, error)
+    assert isinstance(bad_connection.worker_failure, error)
+    assert broken.worker_failure.__traceback__ is None
+    assert good_connection.worker_failure is None
     with pytest.raises(RuntimeError, match="new client"):
         broken.ports()
     with pytest.raises(RuntimeError, match="new client"):
@@ -324,6 +329,7 @@ def test_failed_open_discards_the_worker_instead_of_restoring_a_suspect_native_c
     output = midi.MidiOutput("failed_open")
     with pytest.raises(midi.ConnectError, match="vanished"):
         output.connect(output.ports()[0], "test")
+    assert isinstance(output.worker_failure, midi.ConnectError)
     workers[0].wait(timeout=3)
     with pytest.raises(RuntimeError, match="new client"):
         output.ports()
@@ -366,6 +372,59 @@ def test_input_callback_can_receive_during_open_without_being_pickled(
     with source.connect(source.ports()[0], "test", callback) as connection:
         assert messages.get(timeout=3) == (17, b"\x90\x3c\x7f")
         assert connection.dropped_messages == 0
+        assert connection.last_message_time is not None
+
+
+@pytest.mark.parametrize("isolated", [True, False])
+@pytest.mark.parametrize("delivered", [True, False])
+def test_last_message_time_uses_monotonic_clock_and_survives_close(
+    isolated: bool, delivered: bool, workers: list[Popen[bytes]]
+) -> None:
+    received = Event()
+
+    class LocalConnection:
+        def __init__(self, bridge: CallbackBridge) -> None:
+            self.bridge = bridge
+
+        @property
+        def last_message_time(self) -> float | None:
+            return self.bridge.last_message_time
+
+        def close(self) -> None:
+            self.bridge.retire()
+            self.bridge.drain()
+
+    class LocalClient:
+        def __init__(self, name: str) -> None:
+            pass
+
+        def ports(self) -> list[object]:
+            return [object()]
+
+        def connect(
+            self, port: object, name: str, callback: Callable[[int, bytes], object]
+        ) -> LocalConnection:
+            bridge = CallbackBridge(callback)
+            if delivered:
+                bridge.deliver(17, b"\xf8")
+            return LocalConnection(bridge)
+
+    with patch("midirp._native.MidiInput", LocalClient):
+        source = midi.MidiInput("early" if delivered else "quiet", isolated=isolated)
+        start = monotonic()
+        connection = source.connect(
+            source.ports()[0], "test", lambda t, m: received.set()
+        )
+        if delivered:
+            assert received.wait(3)
+            assert connection.last_message_time is not None
+            assert start <= connection.last_message_time <= monotonic()
+        else:
+            assert connection.last_message_time is None
+        observed = connection.last_message_time
+        connection.close()
+        assert connection.last_message_time == observed
+        assert connection.worker_failure is None
 
 
 @pytest.mark.parametrize("isolated", [True, False])
@@ -548,6 +607,7 @@ def test_callback_and_error_hook_cannot_start_or_send_native_work(
         target.send(message)
 
     def error_hook(event: object) -> None:
+        assert event.object is receive  # ty: ignore[unresolved-attribute]
         try:
             midi.MidiInput("forbidden")
         except midi.CallbackThreadError as error:
@@ -558,6 +618,7 @@ def test_callback_and_error_hook_cannot_start_or_send_native_work(
     with patch("sys.unraisablehook", error_hook):
         connection = source.connect(source.ports()[0], "test", receive)
         assert reported.wait(3)
+        assert connection.last_message_time is not None
         connection.close()
     assert len(errors) == 1
     assert "callback" in errors[0]

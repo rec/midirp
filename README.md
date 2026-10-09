@@ -245,6 +245,16 @@ reuse, and waits for concurrent teardown.
 `closed` is a nonblocking ownership-state snapshot. It remains false during
 teardown and becomes true after client restoration; it does not report device
 health. An isolated worker failure also makes `closed` true.
+Clients and connections expose `worker_failure`: a detached exception describing
+the first known worker failure, or `None` when none is recorded. It preserves
+the failure's type and arguments without retaining its traceback. In-process
+mode has no worker and always reports `None`; this is not a device-health test.
+Input connections expose `last_message_time`, the `time.monotonic()` value in
+seconds when the latest callback delivery started, or `None` before delivery.
+It is recorded before application callback code and remains available after
+close. Queued or dropped messages do not advance it. This clock differs from
+the native microsecond timestamp passed to the callback. Neither silence nor
+a successful operation proves that a device is responsive.
 Context-manager exit closes the connection and propagates body exceptions.
 If both the body and close fail, it raises an `ExceptionGroup` containing the
 body error first and the close error second. Interrupts produce a

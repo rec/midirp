@@ -108,6 +108,10 @@ class MidiInput:
         assert self._native is not None
         return [MidiInputPort._create(p) for p in self._native.ports()]
 
+    @property
+    def worker_failure(self) -> Exception | None:
+        return None if self._context is None else self._context.failure_exception
+
     def port_name(self, port: MidiInputPort) -> str:
         _native.check_thread()
         if not isinstance(port, MidiInputPort):
@@ -221,6 +225,10 @@ class MidiOutput:
             return [MidiOutputPort._create(None, i) for i in identifiers]
         assert self._native is not None
         return [MidiOutputPort._create(p) for p in self._native.ports()]
+
+    @property
+    def worker_failure(self) -> Exception | None:
+        return None if self._context is None else self._context.failure_exception
 
     def port_name(self, port: MidiOutputPort) -> str:
         _native.check_thread()
@@ -337,6 +345,18 @@ class MidiInputConnection:
             else self._delivery.dropped + self._delivery.worker_dropped
         )
 
+    @property
+    def worker_failure(self) -> Exception | None:
+        return self._client.worker_failure
+
+    @property
+    def last_message_time(self) -> float | None:
+        if self._native is not None:
+            return self._native.last_message_time
+        return (
+            None if self._delivery is None else self._delivery.bridge.last_message_time
+        )
+
     def close(self) -> None:
         _native.check_thread()
         if self._native is not None:
@@ -412,6 +432,10 @@ class MidiOutputConnection:
             return self._native.closed
         assert self._client._context is not None
         return self._closed or bool(self._client._context.failure)
+
+    @property
+    def worker_failure(self) -> Exception | None:
+        return self._client.worker_failure
 
     def close(self) -> None:
         _native.check_thread()

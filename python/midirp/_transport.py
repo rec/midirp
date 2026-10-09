@@ -86,6 +86,7 @@ class Context:
         self.replies: Queue[tuple[str, object]] = Queue(1)
         self.stopped = Event()
         self.failure = ""
+        self.failure_exception: Exception | None = None
         self.state = "available"
         self.delivery: weakref.ReferenceType[Delivery] | None = None
         self.generation = 0
@@ -105,7 +106,7 @@ class Context:
                 target=read_results, args=(self,), daemon=True, name="midirp results"
             ).start()
         except (RuntimeError, MemoryError) as error:
-            self.fail("Cannot start MIDI communication threads")
+            self.fail("Cannot start MIDI communication threads", error)
             self.process.wait(timeout=1)
             cast(BinaryIO, self.process.stdin).close()
             cast(BinaryIO, self.process.stdout).close()
@@ -157,26 +158,10 @@ class Context:
         if tag == "error":
             kind, message, fatal, dropped = cast(tuple[str, str, bool, int], payload)
             self.update_dropped(dropped)
+            error = ERROR_TYPES[kind](message)
             if fatal:
-                self.fail(message)
-            errors: dict[str, type[Exception]] = {
-                "MidiError": _native.MidiError,
-                "InitError": _native.InitError,
-                "PortInfoError": _native.PortInfoError,
-                "ConnectError": _native.ConnectError,
-                "SendError": _native.SendError,
-                "StateError": _native.StateError,
-                "CallbackThreadError": _native.CallbackThreadError,
-                "NativePanicError": _native.NativePanicError,
-                "ResourceError": _native.ResourceError,
-                "WorkerError": _native.WorkerError,
-                "WorkerTimeoutError": _native.WorkerTimeoutError,
-                "RuntimeError": RuntimeError,
-                "TypeError": TypeError,
-                "ValueError": ValueError,
-                "NotImplementedError": NotImplementedError,
-            }
-            raise errors[kind](message)
+                self.fail(message, error)
+            raise error
         result, dropped = cast(tuple[object, int], payload)
         self.update_dropped(dropped)
         if self.failure and operation != "shutdown":
@@ -262,12 +247,19 @@ class Context:
 
     def expire(self, operation: str) -> NoReturn:
         message = f"MIDI {operation} exceeded {self.timeout:g}s; create a new client"
-        self.fail(message)
-        raise _native.WorkerTimeoutError(message)
+        error = _native.WorkerTimeoutError(message)
+        self.fail(message, error)
+        raise error
 
-    def fail(self, message: str) -> None:
+    def fail(self, message: str, error: Exception | None = None) -> None:
         if not self.failure:
             self.failure = message
+            # Keep the diagnosis without retaining operation frames or user data.
+            self.failure_exception = (
+                _native.WorkerError(message)
+                if error is None
+                else type(error)(*error.args)
+            )
             self.state = "failed"
             self.stopped.set()
             if self.delivery is not None and (delivery := self.delivery()) is not None:
@@ -359,6 +351,13 @@ def read_results(context: Context) -> None:
                         offer(context.delivery, timestamp, message, dropped)
             else:
                 context.replies.put_nowait((tag, payload))
+                if tag == "error":
+                    kind, message, fatal, dropped = cast(
+                        tuple[str, str, bool, int], payload
+                    )
+                    if fatal:
+                        # Preserve the reported cause before observing pipe EOF.
+                        context.fail(message, ERROR_TYPES[kind](message))
                 if tag == "shutdown":
                     context.failure = "MIDI worker shut down"
                     context.state = "failed"
@@ -436,6 +435,23 @@ def shutdown() -> None:
 
 
 RECEIVE_CAPACITY = 128
+ERROR_TYPES: dict[str, type[Exception]] = {
+    "MidiError": _native.MidiError,
+    "InitError": _native.InitError,
+    "PortInfoError": _native.PortInfoError,
+    "ConnectError": _native.ConnectError,
+    "SendError": _native.SendError,
+    "StateError": _native.StateError,
+    "CallbackThreadError": _native.CallbackThreadError,
+    "NativePanicError": _native.NativePanicError,
+    "ResourceError": _native.ResourceError,
+    "WorkerError": _native.WorkerError,
+    "WorkerTimeoutError": _native.WorkerTimeoutError,
+    "RuntimeError": RuntimeError,
+    "TypeError": TypeError,
+    "ValueError": ValueError,
+    "NotImplementedError": NotImplementedError,
+}
 CONTEXTS: weakref.WeakSet[Context] = weakref.WeakSet()
 SHUTTING_DOWN = False
 atexit.register(shutdown)

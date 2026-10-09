@@ -178,11 +178,12 @@ def test_larger_sysex_is_preserved_after_close(size: int) -> None:
     target = midi.MidiOutput("midirp SysEx output")
     token = f"midirp-sysex-{uuid4().hex}"
     message = b"\xf0\x7d" + bytes(i % 128 for i in range(size - 3)) + b"\xf7"
-    with source.create_virtual(token, receiver):
+    with source.create_virtual(token, receiver) as incoming:
         (port,) = (p for p in target.ports() if token in target.port_name(p))
         with target.connect(port, token) as outgoing:
             outgoing.send(message)
             timestamp, retained = receiver.messages.get(timeout=5)
+        assert incoming.last_message_time is not None
     assert retained == message
     assert timestamp >= 0
 

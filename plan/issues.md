@@ -186,8 +186,8 @@ checks do not validate Windows framing.
 ### D1. Connection state is not device health
 
 **API limitation.** `closed` checks whether the binding owns a native connection.
-There is no disconnect notification API, heartbeat, last-received timestamp,
-health state, automatic reopen, or native-error stream. An unplugged input can
+There is no disconnect notification API, heartbeat, device-health state,
+automatic reopen, or native backend event stream. An unplugged input can
 simply stop delivering while `closed` remains false. Silent hardware, an
 unresponsive device, and a legitimately idle device can look identical.
 Successful send means the backend accepted the operation as implemented, not
@@ -343,7 +343,7 @@ and [Ignore](https://github.com/Boddlnagg/midir/blob/v0.11.0/src/lib.rs):
 | Input close returns `(MidiInput, T)`; output close returns `MidiOutput` | `close()` returns `None` | Reuse the original client variable, not the return value. |
 | `Result`, `Option`, generic `ConnectError<T>`, error kinds | Exceptions, `None`, four `MidiError` subclasses | No returned failed-client object or structured native error-kind API. |
 | Rust port `Clone`, `MidiIO`, port-vector aliases | Python handles/lists | No exposed clone method, generic trait, or collection aliases. |
-| No matching Rust connection convenience surface | `closed`, context managers; module `__version__`, `MidiError` base | Python additions. |
+| No matching Rust connection convenience surface | `closed`, context managers, `worker_failure`, input `last_message_time`/`dropped_messages`; module `__version__`, `MidiError` base and binding error categories | Python additions. |
 
 This table is a comparison of the project's intended default backend surface,
 not a claim to bind every optional Rust feature or backend.
@@ -374,8 +374,8 @@ not a claim to bind every optional Rust feature or backend.
   every native panic/allocation failure. Native backend error details are not
   a stable structured taxonomy for recovery decisions.
 - Context-manager exit waits for close. Exceptional teardown can block.
-  Idempotence is a normal
-  successful-teardown property, not a driver-failure recovery guarantee.
+  Idempotence is a normal successful-teardown property, not a driver-failure
+  recovery guarantee.
 
 ### A3. Callback traps
 
@@ -433,7 +433,7 @@ software endpoints or hardware; ordinary CI should not probe arbitrary devices.
    and long-duration timestamp tests on each backend. Record message loss,
    cleanup time, surviving resources, exceptions, and identity changes.
 5. Validate the new default process boundary on each native backend under faults.
-   Health events, byte budgets, framing, and structured error changes remain
+   Device-health events and framing changes remain
    separate API decisions; process isolation does not establish device health.
 6. Update user guidance for client retention, asynchronous destruction,
    callback constraints, SysEx framing, API differences, and the limits of
