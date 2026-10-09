@@ -7,8 +7,9 @@ API from `midirp.midi`. There are no Python runtime dependencies.
 The build matrix exercises standard, GIL-enabled CPython 3.11–3.14 on macOS
 arm64/x86_64, Linux x86_64 (ALSA), and Windows x86_64 (WinMM). Build and unit
 checks do not establish native MIDI support. See [validation](plan/validation.md)
-for recorded results and outstanding native checks. Free-threaded Python,
-subinterpreters, PyPy, musl, and other architectures are outside this matrix.
+for recorded results and outstanding native checks. Free-threaded Python builds
+and subinterpreters are rejected on import. PyPy, musl, and other architectures
+are outside this matrix.
 
 ## Installation and building
 

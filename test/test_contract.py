@@ -1,8 +1,16 @@
+import sys
 from importlib.metadata import version
 from importlib.resources import files
+from pathlib import Path
+from subprocess import run
 
 import pytest
 from midirp import midi
+
+
+def test_free_threaded_build_is_rejected_before_runtime_initialization() -> None:
+    fixture = Path(__file__).parent / "native" / "midirp_import.py"
+    run([sys.executable, str(fixture)], check=True, timeout=10)
 
 
 def test_extension_version_matches_distribution() -> None:

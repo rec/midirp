@@ -148,6 +148,14 @@ pub fn initialize(py: Python<'_>) -> PyResult<()> {
             "midirp does not support subinterpreters",
         ));
     }
+    if PyModule::import(py, "sysconfig")?
+        .call_method1("get_config_var", ("Py_GIL_DISABLED",))?
+        .is_truthy()?
+    {
+        return Err(PyRuntimeError::new_err(
+            "midirp requires a standard GIL-enabled Python build; free-threaded builds are unsupported",
+        ));
+    }
     if RUNTIME.get().is_none() {
         let runtime = Runtime::start().map_err(|error| {
             PyRuntimeError::new_err(format!("start MIDI cleanup workers: {error}"))

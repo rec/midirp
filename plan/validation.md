@@ -192,6 +192,22 @@ checks. Release-only CI was preserved; this push schedules no matrix run.
 Synchronous wrappers returning deferred objects remain an application concern;
 callback results are still ignored. Other A3 limitations remain in the inventory.
 
+## Unsupported free-threaded build rejection (L6), 2026-10-09
+
+Native lifecycle initialization now rejects free-threaded Python builds before
+starting cleanup workers or registering exit cleanup, even if such a build has
+temporarily enabled its GIL. Detection uses
+[Python's documented build flag](https://docs.python.org/3/howto/free-threading-python.html#identifying-free-threaded-python),
+`sysconfig.get_config_var("Py_GIL_DISABLED")`. This enforces the existing standard
+GIL-enabled interpreter contract without new dependencies or build tooling.
+
+A fresh-interpreter regression injects that flag, verifies the rejection before
+exit registration and private-module publication, then successfully imports
+after restoring the ordinary build flag. This tests the guard on standard
+CPython, not a native free-threaded build or concurrency support.
+All 74 Python checks, Cargo formatting, Clippy with warnings denied, Ruff,
+Python formatting, ty, pyupgrade, and the scoped diff check pass.
+
 ## Native backend checks
 
 `test/manual/loopback.py` explicitly selects unique temporary software endpoints

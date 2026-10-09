@@ -93,12 +93,6 @@ in the child, as documented. Subinterpreters are rejected. Reinitializing an
 embedded main interpreter in the same process is unvalidated: the process-wide
 `OnceLock` survives and its registry may already be marked closing.
 
-Free-threaded Python is outside the tested contract. The runtime explicitly
-assumes GIL-serialized initialization; the binding does not add its own explicit
-free-threaded-build rejection. This needs a contract-enforcement check against
-PyO3's module/GIL behavior, not an assumption that every unsupported build
-either safely works or cleanly fails.
-
 ## Backend-specific exceptional paths
 
 ### B3. WinMM partial initialization lacks complete rollback
