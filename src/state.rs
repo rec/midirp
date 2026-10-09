@@ -2,12 +2,15 @@ use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
+#[cfg(test)]
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::{PyBytes, PyBytesMethods};
 use pyo3::{Bound, PyResult, Python};
 
 use crate::callback::check_blocking_thread;
-use crate::errors::{failed_error, native_call, report_failure, ConnectError, SendError};
+use crate::errors::{
+    failed_error, native_call, report_failure, ConnectError, SendError, StateError,
+};
 
 /// Owns a client except while a connection owns its native resource.
 pub struct Client<T> {
@@ -45,7 +48,7 @@ impl<T> Client<T> {
                     }
                 }
             }
-            _ => Err(PyRuntimeError::new_err(
+            _ => Err(StateError::new_err(
                 "MIDI client is unavailable while connecting, connected, or closing",
             )),
         }
@@ -60,7 +63,7 @@ impl<T> Client<T> {
         let native = {
             let mut state = self.try_state()?;
             if !matches!(*state, ClientState::Available(_)) {
-                return Err(PyRuntimeError::new_err(
+                return Err(StateError::new_err(
                     "MIDI client is unavailable while connecting, connected, or closing",
                 ));
             }
@@ -119,7 +122,7 @@ impl<T> Client<T> {
         let state = match self.state.try_lock() {
             Ok(state) => state,
             Err(TryLockError::WouldBlock) => {
-                return Err(PyRuntimeError::new_err(
+                return Err(StateError::new_err(
                     "MIDI client is busy with another operation",
                 ))
             }
@@ -180,7 +183,7 @@ impl<T> Connection<T> {
             self.check_failed()?;
             let native = native
                 .as_mut()
-                .ok_or_else(|| PyRuntimeError::new_err("MIDI connection is closed"))?;
+                .ok_or_else(|| StateError::new_err("MIDI connection is closed"))?;
             match native_call("send", || operation(native, message)) {
                 Ok(result) => result.map_err(|error| SendError::new_err(format!("send: {error}"))),
                 Err(error) => {
@@ -302,7 +305,9 @@ mod tests {
         Python::attach(|py| {
             let client = Client::new(Native, false);
             let result: PyResult<()> = client.with_available(|_| panic!("metadata fault"));
-            assert!(result.unwrap_err().is_instance_of::<PyRuntimeError>(py));
+            assert!(result
+                .unwrap_err()
+                .is_instance_of::<crate::errors::NativePanicError>(py));
             assert!(client
                 .with_available::<()>(|_| panic!("failed client must not enumerate"))
                 .is_err());

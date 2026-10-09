@@ -78,7 +78,7 @@ class Context:
         self, timeout: float, receive_byte_limit: int = DEFAULT_RECEIVE_BYTE_LIMIT
     ) -> None:
         if SHUTTING_DOWN:
-            raise RuntimeError("MIDI interpreter shutdown has begun")
+            raise _native.StateError("MIDI interpreter shutdown has begun")
         self.timeout = timeout
         self.receive_byte_limit = receive_byte_limit
         self.operation = Lock()
@@ -104,11 +104,13 @@ class Context:
             Thread(
                 target=read_results, args=(self,), daemon=True, name="midirp results"
             ).start()
-        except (RuntimeError, MemoryError):
+        except (RuntimeError, MemoryError) as error:
             self.fail("Cannot start MIDI communication threads")
             self.process.wait(timeout=1)
             cast(BinaryIO, self.process.stdin).close()
             cast(BinaryIO, self.process.stdout).close()
+            if isinstance(error, RuntimeError):
+                raise _native.ResourceError(str(error)) from error
             raise
 
     def request(
@@ -124,7 +126,7 @@ class Context:
         if not acquired:
             if serial:
                 self.expire(operation)
-            raise RuntimeError("MIDI client is busy with another operation")
+            raise _native.StateError("MIDI client is busy with another operation")
         try:
             return self.exchange(operation, args, deadline)
         finally:
@@ -132,24 +134,24 @@ class Context:
 
     def exchange(self, operation: str, args: list[object], deadline: float) -> object:
         if self.failure:
-            raise RuntimeError(
+            raise _native.StateError(
                 f"MIDI worker failed; create a new client: {self.failure}"
             )
         if operation in ("ports", "port_name", "ignore") and self.state != "available":
-            raise RuntimeError(
+            raise _native.StateError(
                 "MIDI client is unavailable while connecting, connected, or closing"
             )
         if operation == "send" and (
             args[1] != self.generation or self.state != "connected"
         ):
-            raise RuntimeError("MIDI connection is closed")
+            raise _native.StateError("MIDI connection is closed")
         self.requests.put_nowait((operation, args))
         try:
             tag, payload = self.replies.get(timeout=max(0, deadline - monotonic()))
         except Empty:
             self.expire(operation)
         if tag == "dead":
-            raise RuntimeError(
+            raise _native.WorkerError(
                 f"MIDI worker failed; create a new client: {self.failure}"
             )
         if tag == "error":
@@ -163,6 +165,12 @@ class Context:
                 "PortInfoError": _native.PortInfoError,
                 "ConnectError": _native.ConnectError,
                 "SendError": _native.SendError,
+                "StateError": _native.StateError,
+                "CallbackThreadError": _native.CallbackThreadError,
+                "NativePanicError": _native.NativePanicError,
+                "ResourceError": _native.ResourceError,
+                "WorkerError": _native.WorkerError,
+                "WorkerTimeoutError": _native.WorkerTimeoutError,
                 "RuntimeError": RuntimeError,
                 "TypeError": TypeError,
                 "ValueError": ValueError,
@@ -172,7 +180,7 @@ class Context:
         result, dropped = cast(tuple[object, int], payload)
         self.update_dropped(dropped)
         if self.failure and operation != "shutdown":
-            raise RuntimeError(
+            raise _native.StateError(
                 f"MIDI worker failed; create a new client: {self.failure}"
             )
         return result
@@ -185,7 +193,7 @@ class Context:
         try:
             if generation == self.generation:
                 if self.failure:
-                    raise RuntimeError(
+                    raise _native.StateError(
                         f"MIDI worker failed; create a new client: {self.failure}"
                     )
                 self.state = "closing"
@@ -203,15 +211,15 @@ class Context:
     ) -> Delivery | None:
         _native.check_thread()
         if not self.operation.acquire(blocking=False):
-            raise RuntimeError("MIDI client is busy with another operation")
+            raise _native.StateError("MIDI client is busy with another operation")
         delivery = None
         try:
             if self.failure:
-                raise RuntimeError(
+                raise _native.StateError(
                     f"MIDI worker failed; create a new client: {self.failure}"
                 )
             if self.state != "available":
-                raise RuntimeError(
+                raise _native.StateError(
                     "MIDI client is unavailable while connecting, connected, or closing"
                 )
             self.state = "opening"
@@ -255,7 +263,7 @@ class Context:
     def expire(self, operation: str) -> NoReturn:
         message = f"MIDI {operation} exceeded {self.timeout:g}s; create a new client"
         self.fail(message)
-        raise TimeoutError(message)
+        raise _native.WorkerTimeoutError(message)
 
     def fail(self, message: str) -> None:
         if not self.failure:

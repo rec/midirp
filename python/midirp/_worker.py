@@ -169,7 +169,7 @@ def serve(worker: Worker, source: BinaryIO) -> None:
             result = worker.perform(operation, args)
         except BusyError as error:
             worker.sender.send(
-                "error", ("RuntimeError", str(error), False, dropped(worker))
+                "error", ("StateError", str(error), False, dropped(worker))
             )
         except (TypeError, ValueError, NotImplementedError) as error:
             worker.sender.send(

@@ -265,12 +265,20 @@ a context manager does not prevent another owner from closing it.
 | Sending | `SendError` |
 | Wrong argument type/direction | `TypeError` |
 | Unknown filter bits | `ValueError` |
-| Busy/unavailable client, closed connection, blocking MIDI call from callback | `RuntimeError` |
-| Caught native panic or subsequently failed resource | `RuntimeError` |
+| Busy/unavailable client, closed or failed resource, interpreter shutdown | `StateError` |
+| Blocking MIDI call from callback or error hook | `CallbackThreadError` |
+| Caught native panic | `NativePanicError` |
+| Cleanup capacity or cleanup/communication thread startup failure | `ResourceError` |
+| Isolated worker exit or pipe failure | `WorkerError` |
 | Virtual ports on Windows | `NotImplementedError` |
-| Isolated operation exceeds its configured deadline | `TimeoutError` |
+| Isolated operation exceeds its configured deadline | `WorkerTimeoutError` |
 
 The four native errors inherit from `MidiError` and retain upstream detail.
+The named binding errors inherit from `RuntimeError`, except `WorkerTimeoutError`
+which inherits from `TimeoutError`. Catch their types to distinguish binding
+failure categories; diagnostic strings are not a stable machine-readable API.
+Native error details remain backend-specific; the library does not infer a
+driver diagnosis from those strings.
 There is no automatic retry, reconnection, or promise of immediate unplug
 detection. Handle device failures in the application.
 

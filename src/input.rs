@@ -167,7 +167,7 @@ impl MidiInputConnection {
     fn __enter__(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<Self>> {
         slf.get().resource.native.check_failed()?;
         if slf.get().closed(py) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            return Err(crate::errors::StateError::new_err(
                 "MIDI connection is closed",
             ));
         }

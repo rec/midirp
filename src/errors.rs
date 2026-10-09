@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyRuntimeError};
+use pyo3::exceptions::{PyException, PyRuntimeError, PyTimeoutError};
 use pyo3::PyResult;
 
 /// Callers must invalidate affected ownership when a native call unwinds.
@@ -13,14 +13,14 @@ pub fn native_call<T>(operation: &str, call: impl FnOnce() -> T) -> PyResult<T> 
             .map(String::as_str)
             .or_else(|| payload.downcast_ref::<&str>().copied())
             .unwrap_or("unknown panic");
-        PyRuntimeError::new_err(format!(
+        NativePanicError::new_err(format!(
             "native MIDI {operation} panicked; recreate affected resources: {detail}"
         ))
     })
 }
 
 pub fn failed_error() -> pyo3::PyErr {
-    PyRuntimeError::new_err("MIDI resource failed; create a new client")
+    StateError::new_err("MIDI resource failed; create a new client")
 }
 
 /// Diagnostics must not turn cleanup failures into another unwind.
@@ -57,4 +57,41 @@ create_exception!(
     SendError,
     MidiError,
     "A MIDI message could not be sent."
+);
+
+create_exception!(
+    midirp.midi,
+    StateError,
+    PyRuntimeError,
+    "MIDI ownership state prevents this operation."
+);
+create_exception!(
+    midirp.midi,
+    CallbackThreadError,
+    PyRuntimeError,
+    "A blocking MIDI operation was attempted from a callback."
+);
+create_exception!(
+    midirp.midi,
+    NativePanicError,
+    PyRuntimeError,
+    "A recoverable native MIDI panic occurred."
+);
+create_exception!(
+    midirp.midi,
+    ResourceError,
+    PyRuntimeError,
+    "MIDI lifecycle resources could not be allocated."
+);
+create_exception!(
+    midirp.midi,
+    WorkerError,
+    PyRuntimeError,
+    "The MIDI worker exited or communication failed."
+);
+create_exception!(
+    midirp.midi,
+    WorkerTimeoutError,
+    PyTimeoutError,
+    "A MIDI worker operation exceeded its deadline."
 );

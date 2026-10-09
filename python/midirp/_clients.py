@@ -354,7 +354,7 @@ class MidiInputConnection:
         if self._native is not None:
             self._native.__enter__()
         elif self.closed:
-            raise RuntimeError("MIDI connection is closed or failed")
+            raise _native.StateError("MIDI connection is closed or failed")
         return self
 
     def __exit__(
@@ -400,7 +400,7 @@ class MidiOutputConnection:
             self._native.send(message)
         else:
             if self.closed:
-                raise RuntimeError("MIDI connection is closed or failed")
+                raise _native.StateError("MIDI connection is closed or failed")
             assert self._client._context is not None
             self._client._context.request(
                 "send", [message, self._generation], serial=True
@@ -426,7 +426,7 @@ class MidiOutputConnection:
         if self._native is not None:
             self._native.__enter__()
         elif self.closed:
-            raise RuntimeError("MIDI connection is closed or failed")
+            raise _native.StateError("MIDI connection is closed or failed")
         return self
 
     def __exit__(

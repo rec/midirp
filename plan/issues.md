@@ -371,8 +371,8 @@ not a claim to bind every optional Rust feature or backend.
   every transport or timestamp-related message uniformly across backends.
 - A `MidiError` handler does not catch wrong-type errors, unavailable-state
   `RuntimeError`, Windows `NotImplementedError`, Python callback exceptions, or
-  every native panic/allocation failure. Native error messages are not a stable
-  structured error taxonomy for recovery decisions.
+  every native panic/allocation failure. Native backend error details are not
+  a stable structured taxonomy for recovery decisions.
 - Context-manager exit waits for close. Exceptional teardown can block.
   Idempotence is a normal
   successful-teardown property, not a driver-failure recovery guarantee.

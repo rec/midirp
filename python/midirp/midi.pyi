@@ -21,6 +21,24 @@ class ConnectError(MidiError):
 class SendError(MidiError):
     """A MIDI message could not be sent."""
 
+class StateError(RuntimeError):
+    """MIDI ownership state prevents this operation."""
+
+class CallbackThreadError(RuntimeError):
+    """A blocking MIDI operation was attempted from a callback."""
+
+class NativePanicError(RuntimeError):
+    """A recoverable native MIDI panic occurred."""
+
+class ResourceError(RuntimeError):
+    """MIDI lifecycle resources could not be allocated."""
+
+class WorkerError(RuntimeError):
+    """The MIDI worker exited or communication failed."""
+
+class WorkerTimeoutError(TimeoutError):
+    """A MIDI worker operation exceeded its deadline."""
+
 class Ignore:
     """Immutable upstream input-filter bits. ALL combines three filters."""
 

@@ -10,7 +10,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::callback::Callback;
-use crate::errors::{failed_error, native_call, report_failure};
+use crate::errors::{failed_error, native_call, report_failure, ResourceError, StateError};
 use crate::state::{Client, Connection};
 
 pub trait Resource: Send + Sync {
@@ -62,7 +62,7 @@ impl<C, N> Managed<C, N> {
             failed_error()
         })?;
         if *closed {
-            return Err(PyRuntimeError::new_err(
+            return Err(StateError::new_err(
                 "MIDI connection was closed before opening completed",
             ));
         }
@@ -119,9 +119,7 @@ impl<C: Send, N: Send> Resource for Managed<C, N> {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .map_err(|_| {
-                PyRuntimeError::new_err("MIDI connection is already registered or closed")
-            })?;
+            .map_err(|_| StateError::new_err("MIDI connection is already registered or closed"))?;
         Ok(Arc::clone(&self.cleanup))
     }
 
@@ -158,7 +156,7 @@ pub fn initialize(py: Python<'_>) -> PyResult<()> {
     }
     if RUNTIME.get().is_none() {
         let runtime = Runtime::start().map_err(|error| {
-            PyRuntimeError::new_err(format!("start MIDI cleanup workers: {error}"))
+            ResourceError::new_err(format!("start MIDI cleanup workers: {error}"))
         })?;
         let registration = PyModule::import(py, "atexit")
             .and_then(|atexit| atexit.call_method1("register", (wrap_pyfunction!(shutdown, py)?,)));
@@ -283,16 +281,14 @@ impl Runtime {
             .lock()
             .expect("registry lock poisoned");
         if registry.closing {
-            return Err(PyRuntimeError::new_err(
-                "MIDI interpreter shutdown has begun",
-            ));
+            return Err(StateError::new_err("MIDI interpreter shutdown has begun"));
         }
         // Inspect separate registration flags without temporarily owning native resources.
         registry.resources.retain(|(resource, state)| {
             resource.strong_count() != 0 && state.load(Ordering::Acquire) != FINISHED
         });
         if registry.resources.len() == CONNECTION_CAPACITY {
-            return Err(PyRuntimeError::new_err(format!("MIDI connection capacity exhausted ({CONNECTION_CAPACITY}); close existing connections and allow cleanup to finish")));
+            return Err(ResourceError::new_err(format!("MIDI connection capacity exhausted ({CONNECTION_CAPACITY}); close existing connections and allow cleanup to finish")));
         }
         let state = resource.reserve()?;
         registry.resources.push((Arc::downgrade(&resource), state));
@@ -534,7 +530,7 @@ mod tests {
         ));
         let error = runtime.register(next.clone()).unwrap_err();
         Python::initialize();
-        Python::attach(|py| assert!(error.is_instance_of::<PyRuntimeError>(py)));
+        Python::attach(|py| assert!(error.is_instance_of::<ResourceError>(py)));
         runtime.enqueue(next.clone());
         assert_eq!(next.client.with_available(|value| Ok(*value)).unwrap(), 19);
         resources[0].close().unwrap();

@@ -275,6 +275,21 @@ All 98 Python checks, Ruff, formatting, ty, pyupgrade, and the scoped diff check
 pass. Queue budgets exclude interpreter overhead, in-flight messages, native
 unfinished SysEx, and application-retained messages; those R2 risks remain open.
 
+## Binding error categories (A2/A4), 2026-10-09
+
+The public API exports StateError, CallbackThreadError, NativePanicError,
+ResourceError, WorkerError, and WorkerTimeoutError. They preserve the existing
+RuntimeError/TimeoutError bases while distinguishing failures without parsing
+messages. Native returned errors retain their four existing exception classes
+and backend-specific detail. Worker replies preserve named categories.
+
+Existing fault checks now assert actual state, callback-thread, thread-quota,
+worker-exit, timeout, native-panic, and cleanup-capacity categories. Contract
+checks cover all six public exception types and their bases. This does not
+translate unreported backend events or infer device diagnoses from native text.
+All 104 Python checks, Rust formatting, Clippy with warnings denied, Ruff,
+Python formatting, ty, pyupgrade, and the scoped diff check pass.
+
 ## Native backend checks
 
 `test/manual/loopback.py` explicitly selects unique temporary software endpoints

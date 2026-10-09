@@ -20,6 +20,21 @@ fn midi(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("PortInfoError", py.get_type::<errors::PortInfoError>())?;
     module.add("ConnectError", py.get_type::<errors::ConnectError>())?;
     module.add("SendError", py.get_type::<errors::SendError>())?;
+    module.add("StateError", py.get_type::<errors::StateError>())?;
+    module.add(
+        "CallbackThreadError",
+        py.get_type::<errors::CallbackThreadError>(),
+    )?;
+    module.add(
+        "NativePanicError",
+        py.get_type::<errors::NativePanicError>(),
+    )?;
+    module.add("ResourceError", py.get_type::<errors::ResourceError>())?;
+    module.add("WorkerError", py.get_type::<errors::WorkerError>())?;
+    module.add(
+        "WorkerTimeoutError",
+        py.get_type::<errors::WorkerTimeoutError>(),
+    )?;
     module.add_class::<ignore::Ignore>()?;
     module.add_class::<input::MidiInput>()?;
     module.add_class::<input::MidiInputPort>()?;
@@ -34,6 +49,12 @@ fn midi(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "PortInfoError",
         "ConnectError",
         "SendError",
+        "StateError",
+        "CallbackThreadError",
+        "NativePanicError",
+        "ResourceError",
+        "WorkerError",
+        "WorkerTimeoutError",
         "Ignore",
         "MidiInput",
         "MidiInputPort",

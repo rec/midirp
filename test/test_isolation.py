@@ -103,7 +103,7 @@ def test_partial_thread_startup_failure_terminates_and_reaps_its_child(
         start(thread)
 
     with patch.object(Thread, "start", limited_start):
-        with pytest.raises(RuntimeError, match="thread quota"):
+        with pytest.raises(midi.ResourceError, match="thread quota"):
             midi.MidiOutput("output")
     assert len(workers) == 1
     assert workers[0].poll() is not None
@@ -160,12 +160,12 @@ def test_isolated_discovery_send_close_and_reopen_use_the_same_client(
         hash(port)
     for _ in range(2):
         with output.connect(port, "test") as connection:
-            with pytest.raises(RuntimeError, match="unavailable"):
+            with pytest.raises(midi.StateError, match="unavailable"):
                 output.ports()
             connection.send(b"\xf0\x7d\x00\xff\xf7")
         assert connection.closed
         connection.close()
-        with pytest.raises(RuntimeError, match="closed"):
+        with pytest.raises(midi.StateError, match="closed"):
             connection.send(b"\xf8")
     assert len(workers) == 1
     del output, connection
@@ -181,11 +181,11 @@ def test_native_failure_invalidates_only_its_worker_and_requires_a_fresh_client(
     bad_connection = broken.connect(broken.ports()[0], "test")
     good_connection = healthy.connect(healthy.ports()[0], "test")
     error = (
-        TimeoutError
+        midi.WorkerTimeoutError
         if mode == "hang_send"
         else midi.SendError
         if mode == "native_error"
-        else RuntimeError
+        else midi.WorkerError
     )
     started = monotonic()
     with pytest.raises(error):
@@ -550,7 +550,7 @@ def test_callback_and_error_hook_cannot_start_or_send_native_work(
     def error_hook(event: object) -> None:
         try:
             midi.MidiInput("forbidden")
-        except RuntimeError as error:
+        except midi.CallbackThreadError as error:
             errors.append(str(error))
         reported.set()
 

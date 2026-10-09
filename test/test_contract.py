@@ -34,6 +34,26 @@ def test_native_errors_have_a_common_base(error: type[midi.MidiError]) -> None:
 
 
 @pytest.mark.parametrize(
+    "error, base",
+    [
+        (midi.StateError, RuntimeError),
+        (midi.CallbackThreadError, RuntimeError),
+        (midi.NativePanicError, RuntimeError),
+        (midi.ResourceError, RuntimeError),
+        (midi.WorkerError, RuntimeError),
+        (midi.WorkerTimeoutError, TimeoutError),
+    ],
+)
+def test_binding_error_categories_keep_their_builtin_bases(
+    error: type[Exception], base: type[Exception]
+) -> None:
+    instance = error("failure detail")
+    assert isinstance(instance, base)
+    assert str(instance) == "failure detail"
+    assert error.__module__ == "midirp.midi"
+
+
+@pytest.mark.parametrize(
     "handle",
     [
         midi.MidiInputPort,

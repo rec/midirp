@@ -4,12 +4,14 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, LockResult, Mutex, MutexGuard};
 
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+#[cfg(test)]
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::{PyTraverseError, PyVisit};
 
-use crate::errors::failed_error;
+use crate::errors::{failed_error, CallbackThreadError};
 
 /// Reuses the native callback contract on a parent-process dispatch thread.
 #[pyclass(frozen, module = "midirp._native")]
@@ -156,7 +158,7 @@ impl Callback {
 
 pub fn check_blocking_thread() -> PyResult<()> {
     if IN_CALLBACK.get() {
-        return Err(PyRuntimeError::new_err(
+        return Err(CallbackThreadError::new_err(
             "Cannot perform blocking MIDI operations from a callback; use the controlling thread",
         ));
     }
