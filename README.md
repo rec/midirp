@@ -75,7 +75,9 @@ for port in output.ports():
 ```
 
 Choose a port's ID deliberately, then use `find_port_by_id(id)`. A missing ID
-returns `None`; an empty port list is valid. Names need not be unique. Handles
+returns `None`; duplicate matching IDs raise `PortInfoError` in either mode.
+CoreMIDI ID `"0"` raises `PortInfoError` because it indicates an unavailable ID.
+An empty port list is valid. Names need not be unique. Handles
 support equality and are unhashable. IDs are opaque backend identifiers; there
 is no extra persistence guarantee across disconnection or reboot. Input and
 output handles are different types. Discovery can race with unplugging.

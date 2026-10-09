@@ -11,6 +11,7 @@ from . import midi
 
 # isort: split
 from . import _native
+from ._clients import validate_port_id
 from ._transport import ReceiveQueue
 
 
@@ -105,7 +106,7 @@ class Worker:
         if self.connection is not None:
             raise BusyError("MIDI client is unavailable while connected")
         if operation == "ports":
-            return [p.id() for p in self.client.ports()]
+            return [validate_port_id(p.id()) for p in self.client.ports()]
         if operation == "port_name":
             if isinstance(self.client, _native.MidiInput):
                 return self.client.port_name(self.input_port(cast(str, args[0])))
@@ -142,7 +143,10 @@ class Worker:
 
     def input_port(self, identifier: str) -> _native.MidiInputPort:
         assert isinstance(self.client, _native.MidiInput)
-        matches = [p for p in self.client.ports() if p.id() == identifier]
+        validate_port_id(identifier)
+        matches = [
+            p for p in self.client.ports() if validate_port_id(p.id()) == identifier
+        ]
         if len(matches) != 1:
             raise _native.PortInfoError(
                 "MIDI port is absent or its ID is ambiguous; rediscover ports"
@@ -151,7 +155,10 @@ class Worker:
 
     def output_port(self, identifier: str) -> _native.MidiOutputPort:
         assert isinstance(self.client, _native.MidiOutput)
-        matches = [p for p in self.client.ports() if p.id() == identifier]
+        validate_port_id(identifier)
+        matches = [
+            p for p in self.client.ports() if validate_port_id(p.id()) == identifier
+        ]
         if len(matches) != 1:
             raise _native.PortInfoError(
                 "MIDI port is absent or its ID is ambiguous; rediscover ports"

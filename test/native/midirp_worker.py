@@ -13,13 +13,19 @@ from midirp._worker import Sender, Worker, serve
 
 
 class InputPort:
+    def __init__(self, identifier: str = "input") -> None:
+        self.identifier = identifier
+
     def id(self) -> str:
-        return "input"
+        return self.identifier
 
 
 class OutputPort:
+    def __init__(self, identifier: str = "output") -> None:
+        self.identifier = identifier
+
     def id(self) -> str:
-        return "output"
+        return self.identifier
 
 
 class Input:
@@ -30,6 +36,8 @@ class Input:
             Event().wait()
 
     def ports(self) -> list[InputPort]:
+        if self.name == "zero_id":
+            return [InputPort("0")]
         return [InputPort(), InputPort()] if self.name == "ambiguous" else [InputPort()]
 
     def port_name(self, port: InputPort) -> str:
@@ -61,7 +69,11 @@ class Output:
             Event().wait()
 
     def ports(self) -> list[OutputPort]:
-        return [OutputPort()]
+        if self.name == "zero_id":
+            return [OutputPort("0")]
+        return (
+            [OutputPort(), OutputPort()] if self.name == "ambiguous" else [OutputPort()]
+        )
 
     def port_name(self, port: OutputPort) -> str:
         return "output port"

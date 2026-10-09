@@ -32,7 +32,9 @@ class MidiInputPort:
 
     def id(self) -> str:
         _native.check_thread()
-        return self._identifier if self._native is None else self._native.id()
+        return validate_port_id(
+            self._identifier if self._native is None else self._native.id()
+        )
 
     def __eq__(self, other: object) -> bool:
         _native.check_thread()
@@ -64,7 +66,9 @@ class MidiOutputPort:
 
     def id(self) -> str:
         _native.check_thread()
-        return self._identifier if self._native is None else self._native.id()
+        return validate_port_id(
+            self._identifier if self._native is None else self._native.id()
+        )
 
     def __eq__(self, other: object) -> bool:
         _native.check_thread()
@@ -116,13 +120,18 @@ class MidiInput:
         _native.check_thread()
         if not isinstance(port, MidiInputPort):
             raise TypeError("Expected a MIDI input port")
+        port.id()
         if self._context is not None:
             return cast(str, self._context.request("port_name", [port.id()]))
         assert self._native is not None
         native = (
             port._native
             if port._native is not None
-            else self._native.find_port_by_id(port.id())
+            else (
+                resolved._native
+                if (resolved := self.find_port_by_id(port.id()))
+                else None
+            )
         )
         if native is None:
             raise _native.PortInfoError("MIDI input port is absent")
@@ -132,11 +141,11 @@ class MidiInput:
         _native.check_thread()
         if not isinstance(id, str):
             raise TypeError("Expected a string MIDI port ID")
-        if self._context is not None:
-            return next((p for p in self.ports() if p.id() == id), None)
-        assert self._native is not None
-        port = self._native.find_port_by_id(id)
-        return None if port is None else MidiInputPort._create(port)
+        validate_port_id(id)
+        matches = [p for p in self.ports() if p.id() == id]
+        if len(matches) > 1:
+            raise _native.PortInfoError("MIDI port ID is ambiguous; rediscover ports")
+        return matches[0] if matches else None
 
     def ignore(self, flags: _native.Ignore) -> None:
         _native.check_thread()
@@ -159,6 +168,7 @@ class MidiInput:
             raise TypeError("MIDI callback must be callable")
         if not isinstance(port, MidiInputPort):
             raise TypeError("Expected a MIDI input port")
+        port.id()
         if self._context is not None:
             connection = MidiInputConnection._create(self, None)
             connection._delivery = self._context.open(
@@ -171,7 +181,11 @@ class MidiInput:
         native = (
             port._native
             if port._native is not None
-            else self._native.find_port_by_id(port.id())
+            else (
+                resolved._native
+                if (resolved := self.find_port_by_id(port.id()))
+                else None
+            )
         )
         if native is None:
             raise _native.ConnectError("MIDI input port is absent")
@@ -234,13 +248,18 @@ class MidiOutput:
         _native.check_thread()
         if not isinstance(port, MidiOutputPort):
             raise TypeError("Expected a MIDI output port")
+        port.id()
         if self._context is not None:
             return cast(str, self._context.request("port_name", [port.id()]))
         assert self._native is not None
         native = (
             port._native
             if port._native is not None
-            else self._native.find_port_by_id(port.id())
+            else (
+                resolved._native
+                if (resolved := self.find_port_by_id(port.id()))
+                else None
+            )
         )
         if native is None:
             raise _native.PortInfoError("MIDI output port is absent")
@@ -250,16 +269,17 @@ class MidiOutput:
         _native.check_thread()
         if not isinstance(id, str):
             raise TypeError("Expected a string MIDI port ID")
-        if self._context is not None:
-            return next((p for p in self.ports() if p.id() == id), None)
-        assert self._native is not None
-        port = self._native.find_port_by_id(id)
-        return None if port is None else MidiOutputPort._create(port)
+        validate_port_id(id)
+        matches = [p for p in self.ports() if p.id() == id]
+        if len(matches) > 1:
+            raise _native.PortInfoError("MIDI port ID is ambiguous; rediscover ports")
+        return matches[0] if matches else None
 
     def connect(self, port: MidiOutputPort, port_name: str) -> MidiOutputConnection:
         validate_open(port_name)
         if not isinstance(port, MidiOutputPort):
             raise TypeError("Expected a MIDI output port")
+        port.id()
         if self._context is not None:
             connection = MidiOutputConnection._create(self, None)
             self._context.open("connect", port.id(), port_name, None)
@@ -270,7 +290,11 @@ class MidiOutput:
         native = (
             port._native
             if port._native is not None
-            else self._native.find_port_by_id(port.id())
+            else (
+                resolved._native
+                if (resolved := self.find_port_by_id(port.id()))
+                else None
+            )
         )
         if native is None:
             raise _native.ConnectError("MIDI output port is absent")
@@ -465,6 +489,12 @@ class MidiOutputConnection:
         if hasattr(self, "_client") and self._native is None and not self._closed:
             assert self._client._context is not None
             self._client._context.defer_close(self._generation)
+
+
+def validate_port_id(identifier: str) -> str:
+    if sys.platform == "darwin" and identifier == "0":
+        raise _native.PortInfoError("CoreMIDI port ID is unavailable; rediscover ports")
+    return identifier
 
 
 def close_context(

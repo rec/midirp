@@ -223,7 +223,8 @@ worker disposal was made graceful; that does not prove driver/hotplug stability.
 **Confirmed in source and API limitation.** Names can duplicate. ALSA IDs are
 client/port addresses, which can be reused after client disappearance. macOS
 IDs depend on native unique-ID property reads; failed reads become the string
-`"0"` upstream instead of raising an error. Multiple such failures can collide.
+`"0"` upstream. The binding rejects that sentinel with `PortInfoError`; it does
+not turn it into a usable identity.
 CoreMIDI equality also returns false when those properties cannot be read, so
 even self-comparison of a stale native-mode handle can behave unexpectedly.
 Isolated handles compare cached IDs and reject ambiguous matches at open, but
@@ -237,8 +238,8 @@ interface identifier is converted from UTF-16 lossily.
 
 **Application implication:** rediscover after device changes, validate the
 selected endpoint, and do not use only a name or old ID to prove that a rebooted
-device is the intended receiver. `find_port_by_id()` returns the first matching
-port or `None`, not a uniqueness or permission diagnosis.
+device is the intended receiver. `find_port_by_id()` rejects duplicate matches
+and returns `None` for a missing ID. A unique match still does not prove enduring identity or permission.
 
 ## Dropping references and effects on the rest of the system
 

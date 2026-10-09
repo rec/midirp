@@ -375,3 +375,19 @@ callback constraints. Source review does not prove driver shutdown safety.
   third-party notices are included in source and wheel distributions.
 - Cross-platform artifact validation and native I/O results remain separate gates.
 - No publication credentials, publish workflow, release, or tag were added.
+
+## Port identity mitigation (D2), 2026-10-09
+
+Public ID lookup now enumerates both modes and rejects duplicate matches with
+`PortInfoError`; a missing ID still returns `None`. CoreMIDI ID `"0"` is rejected
+when reading a handle, looking up an ID, reading metadata, or opening. Isolated
+worker discovery and resolution apply the same sentinel guard. Linux/Windows
+identifiers are not interpreted as CoreMIDI IDs. Focused device-free regressions
+cover both directions, both modes, unique/missing/duplicate lookup, and the
+platform-specific sentinel, including rejection before native metadata/open.
+The remaining D2 text describes reused IDs, stale equality, and backend metadata
+limits that this mitigation cannot remove.
+
+All 120 repository tests pass, including the native lifecycle harness. Ruff,
+formatting, ty, pyupgrade, and the scoped diff check pass. No native MIDI ports
+were opened. Release-only CI remains unchanged.

@@ -241,7 +241,7 @@ def test_send_snapshots_mutable_and_strided_buffers(
             pass
 
         def ports(self) -> list[object]:
-            return [object()]
+            return [LocalPort()]
 
         def connect(self, port: object, name: str) -> LocalConnection:
             return LocalConnection()
@@ -286,7 +286,7 @@ def test_context_exit_preserves_body_and_close_failures(
             pass
 
         def ports(self) -> list[object]:
-            return [object()]
+            return [LocalPort()]
 
         def connect(
             self,
@@ -333,6 +333,101 @@ def test_failed_open_discards_the_worker_instead_of_restoring_a_suspect_native_c
     workers[0].wait(timeout=3)
     with pytest.raises(RuntimeError, match="new client"):
         output.ports()
+
+
+@pytest.mark.parametrize("client", [midi.MidiInput, midi.MidiOutput])
+@pytest.mark.parametrize("isolated", [False, True])
+def test_lookup_rejects_duplicate_ids_and_preserves_missing_results(
+    client: type[midi.MidiInput] | type[midi.MidiOutput],
+    isolated: bool,
+    workers: list[Popen[bytes]],
+) -> None:
+    class Port:
+        def id(self) -> str:
+            return "input" if client is midi.MidiInput else "output"
+
+    class LocalClient:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def ports(self) -> list[Port]:
+            return [Port(), Port()] if self.name == "ambiguous" else [Port()]
+
+    with (
+        patch("midirp._native.MidiInput", LocalClient),
+        patch("midirp._native.MidiOutput", LocalClient),
+    ):
+        source = client("ambiguous", isolated=isolated)
+        identifier = source.ports()[0].id()
+        with pytest.raises(midi.PortInfoError, match="ambiguous"):
+            source.find_port_by_id(identifier)
+        assert source.find_port_by_id("absent") is None
+        healthy = client("healthy", isolated=isolated)
+        found = healthy.find_port_by_id(identifier)
+        assert found is not None and found.id() == identifier
+
+
+@pytest.mark.parametrize("client", [midi.MidiInput, midi.MidiOutput])
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_zero_id_is_rejected_only_for_coremidi(
+    client: type[midi.MidiInput] | type[midi.MidiOutput], platform: str
+) -> None:
+    class Port:
+        def id(self) -> str:
+            return "0"
+
+    class LocalClient:
+        def __init__(self, name: str) -> None:
+            pass
+
+        def ports(self) -> list[Port]:
+            return [Port()]
+
+        def port_name(self, port: Port) -> str:
+            raise AssertionError("Invalid ID reached native metadata lookup")
+
+        def connect(self, *args: object) -> None:
+            raise AssertionError("Invalid ID reached native opening")
+
+    with (
+        patch("midirp._native.MidiInput", LocalClient),
+        patch("midirp._native.MidiOutput", LocalClient),
+        patch("midirp._clients.sys.platform", platform),
+    ):
+        source = client("test", isolated=False)
+        port = source.ports()[0]
+        if platform == "darwin":
+            for f in (
+                port.id,
+                lambda: source.find_port_by_id("0"),
+                lambda: source.port_name(port),  # ty: ignore[invalid-argument-type]
+            ):
+                with pytest.raises(midi.PortInfoError, match="unavailable"):
+                    f()
+            with pytest.raises(midi.PortInfoError, match="unavailable"):
+                if isinstance(source, midi.MidiInput):
+                    source.connect(port, "test", lambda t, m: None)  # ty: ignore[invalid-argument-type]
+                else:
+                    source.connect(port, "test")  # ty: ignore[invalid-argument-type]
+        else:
+            assert port.id() == "0"
+            found = source.find_port_by_id("0")
+            assert found is not None and found.id() == port.id()
+
+
+@pytest.mark.parametrize("client", [midi.MidiInput, midi.MidiOutput])
+def test_isolated_discovery_rejects_unavailable_coremidi_ids(
+    client: type[midi.MidiInput] | type[midi.MidiOutput],
+    workers: list[Popen[bytes]],
+) -> None:
+    source = client("zero_id")
+    if sys.platform == "darwin":
+        with pytest.raises(midi.PortInfoError, match="unavailable"):
+            source.ports()
+        assert isinstance(source.worker_failure, midi.PortInfoError)
+        workers[0].wait(timeout=3)
+    else:
+        assert source.ports()[0].id() == "0"
 
 
 def test_ambiguous_port_ids_are_rejected_before_opening(
@@ -399,7 +494,7 @@ def test_last_message_time_uses_monotonic_clock_and_survives_close(
             pass
 
         def ports(self) -> list[object]:
-            return [object()]
+            return [LocalPort()]
 
         def connect(
             self, port: object, name: str, callback: Callable[[int, bytes], object]
@@ -445,7 +540,7 @@ def test_incompatible_callback_signatures_do_not_consume_the_client(
             pass
 
         def ports(self) -> list[object]:
-            return [object()]
+            return [LocalPort()]
 
     with patch("midirp._native.MidiInput", LocalClient):
         source = midi.MidiInput("early", isolated=isolated)
@@ -486,7 +581,7 @@ def test_deferred_callbacks_are_rejected_without_consuming_the_client(
             pass
 
         def ports(self) -> list[object]:
-            return [object()]
+            return [LocalPort()]
 
     with patch("midirp._native.MidiInput", LocalClient):
         source = midi.MidiInput("early", isolated=isolated)
@@ -673,3 +768,8 @@ def test_invalid_deadlines_are_rejected_before_starting_a_worker(
     with pytest.raises(ValueError, match="positive and finite"):
         midi.MidiOutput("invalid", timeout=timeout)
     assert not workers
+
+
+class LocalPort:
+    def id(self) -> str:
+        return "local"
