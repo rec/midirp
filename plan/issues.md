@@ -383,10 +383,10 @@ not a claim to bind every optional Rust feature or backend.
 **Confirmed in source.** An uninspectable callable with incompatible arguments,
 or a callable that raises, fails later for every message through
 `sys.unraisablehook`; it does not raise in the thread that opened the port.
-Return values are ignored. A synchronous wrapper can still return an unawaited
-coroutine or uniterated generator instead of processing messages. Its return
-behavior cannot be established without calling application code; opening does
-not execute the callback to inspect its result.
+Ordinary return values are ignored. Return behavior cannot be established
+without calling application code; opening does not execute the callback to
+inspect its result. Diagnosing a deferred result cannot make the callback process
+its message or establish whether application code already scheduled that object.
 
 Callbacks execute on parent dispatch threads by default, or native delivery
 threads in-process, rather than the main thread or an asyncio event loop.

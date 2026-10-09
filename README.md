@@ -140,15 +140,19 @@ The callback receives `(timestamp: int, message: bytes)` on a parent dispatch
 thread in isolated mode, or on the native MIDI thread in in-process mode.
 Owned bytes remain valid after the callback returns.
 Timestamps preserve midir's microsecond values and backend origin; do not compare
-unrelated connections' clocks. Return values are ignored. Exceptions are reported
-to `sys.unraisablehook` with the callable as context; later messages still arrive.
+unrelated connections' clocks. Ordinary return values are ignored. Exceptions
+are reported to `sys.unraisablehook` with the callable as context; later messages still arrive.
 
 Callbacks must execute synchronously. Opening rejects coroutine functions,
 generator functions, and async generator functions with `TypeError`, including
 partials and callable objects whose `__call__` has those forms. The library does
 not await or iterate callback results. A synchronous wrapper that returns a
-coroutine or generator cannot be identified reliably at open; its result is
-still ignored. Use a synchronous callback to hand work to your event loop.
+coroutine, generator, async generator, or awaitable cannot be identified reliably
+at open. During delivery, those results produce a `TypeError` through
+`sys.unraisablehook`, with the original callable as context; later messages still
+arrive. Unstarted native coroutines are closed without running their bodies to
+avoid an additional unawaited-coroutine warning. The library does not iterate
+or explicitly cancel other deferred objects. Use a synchronous callback to hand work to your event loop.
 If a callback's signature can be inspected, opening checks that it accepts two
 positional arguments. Incompatible signatures raise `TypeError` before opening;
 uninspectable callables remain accepted without executing them to check.

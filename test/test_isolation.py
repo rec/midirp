@@ -3,6 +3,7 @@
 import gc
 import inspect
 import sys
+import warnings
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterator
 from functools import partial
@@ -688,6 +689,136 @@ def test_initialization_timeout_reaps_the_new_worker(
     with pytest.raises(TimeoutError):
         midi.MidiOutput("hang_init", timeout=1)
     workers[0].wait(timeout=3)
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+@pytest.mark.parametrize(
+    "kind", ["coroutine", "generator", "async_generator", "awaitable"]
+)
+def test_deferred_results_are_reported_without_execution_and_delivery_continues(
+    isolated: bool, kind: str, workers: list[Popen[bytes]]
+) -> None:
+    executed = Event()
+    delivered = Event()
+    reported = Event()
+    errors: list[BaseException] = []
+    returned: list[object] = []
+    messages: list[bytes] = []
+
+    async def coroutine() -> None:
+        executed.set()
+
+    def generator() -> Iterator[None]:
+        executed.set()
+        yield None
+
+    async def async_generator() -> AsyncIterator[None]:
+        executed.set()
+        yield None
+
+    class Awaitable:
+        def __await__(self) -> Iterator[None]:
+            executed.set()
+            yield None
+
+    factories: dict[str, Callable[[], object]] = {
+        "coroutine": coroutine,
+        "generator": generator,
+        "async_generator": async_generator,
+        "awaitable": Awaitable,
+    }
+
+    def receive(timestamp: int, message: bytes) -> object:
+        messages.append(message)
+        if len(messages) == 1:
+            result = factories[kind]()
+            returned.append(result)
+            return result
+        delivered.set()
+        return 37
+
+    def error_hook(event: object) -> None:
+        assert event.object is receive  # ty: ignore[unresolved-attribute]
+        error = event.exc_value  # ty: ignore[unresolved-attribute]
+        assert isinstance(error, TypeError)
+        errors.append(error)
+        reported.set()
+
+    class LocalConnection:
+        def __init__(self, bridge: CallbackBridge) -> None:
+            self.bridge = bridge
+
+        def close(self) -> None:
+            self.bridge.retire()
+            self.bridge.drain()
+
+    class LocalClient:
+        def __init__(self, name: str) -> None:
+            pass
+
+        def ports(self) -> list[LocalPort]:
+            return [LocalPort()]
+
+        def connect(
+            self, port: LocalPort, name: str, callback: Callable[[int, bytes], object]
+        ) -> LocalConnection:
+            bridge = CallbackBridge(callback)
+            bridge.deliver(17, b"\x90\x3c\x7f")
+            bridge.deliver(18, b"\xf8")
+            return LocalConnection(bridge)
+
+    with (
+        patch("midirp._native.MidiInput", LocalClient),
+        patch("sys.unraisablehook", error_hook),
+        warnings.catch_warnings(record=True) as warning_records,
+    ):
+        warnings.simplefilter("always")
+        source = midi.MidiInput("twice", isolated=isolated)
+        connection = source.connect(source.ports()[0], "test", receive)
+        assert reported.wait(3)
+        assert delivered.wait(3)
+        connection.close()
+        assert messages == [b"\x90\x3c\x7f", b"\xf8"]
+        assert len(errors) == 1 and "deferred work" in str(errors[0])
+        assert not executed.is_set()
+        if inspect.iscoroutine(returned[0]):
+            assert inspect.getcoroutinestate(returned[0]) == inspect.CORO_CLOSED
+        returned.clear()
+        gc.collect()
+        assert not warning_records
+
+
+def test_reporting_a_suspended_coroutine_does_not_cancel_it() -> None:
+    class Pause:
+        def __await__(self) -> Iterator[None]:
+            yield None
+
+    async def coroutine() -> None:
+        await Pause()
+
+    result = coroutine()
+    result.send(None)
+    errors: list[BaseException] = []
+
+    def receive(timestamp: int, message: bytes) -> object:
+        return result
+
+    def error_hook(event: object) -> None:
+        assert event.object is receive  # ty: ignore[unresolved-attribute]
+        error = event.exc_value  # ty: ignore[unresolved-attribute]
+        assert isinstance(error, TypeError)
+        errors.append(error)
+
+    bridge = CallbackBridge(receive)
+    try:
+        with patch("sys.unraisablehook", error_hook):
+            bridge.deliver(1, b"\xf8")
+        assert len(errors) == 1
+        assert inspect.getcoroutinestate(result) == inspect.CORO_SUSPENDED
+    finally:
+        result.close()
+        bridge.retire()
+        bridge.drain()
 
 
 def test_callback_and_error_hook_cannot_start_or_send_native_work(

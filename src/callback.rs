@@ -8,7 +8,7 @@ use std::sync::{Condvar, LockResult, Mutex, MutexGuard};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyTuple};
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::errors::{failed_error, CallbackThreadError};
@@ -71,10 +71,21 @@ impl Callback {
         if !callable.bind(py).is_callable() {
             return Err(PyTypeError::new_err("MIDI callback must be callable"));
         }
+        let types = PyModule::import(py, "types")?;
+        let result_types = PyTuple::new(
+            py,
+            [
+                types.getattr("CoroutineType")?,
+                types.getattr("GeneratorType")?,
+                types.getattr("AsyncGeneratorType")?,
+                PyModule::import(py, "collections.abc")?.getattr("Awaitable")?,
+            ],
+        )?;
         Ok(Self {
             state: Mutex::new(DispatchState {
                 callable: Some(callable),
                 clock: Some(PyModule::import(py, "time")?.getattr("monotonic")?.unbind()),
+                result_types: Some(result_types.unbind()),
                 last_message_time: None,
                 accepting: true,
                 active: 0,
@@ -97,7 +108,7 @@ impl Callback {
         // The shutdown registry disables and drains this gate before finalization.
         Python::try_attach(|py| {
             let _thread = CallbackThread::enter();
-            let (callable, clock) = {
+            let (callable, clock, result_types) = {
                 let state = self.recover(self.state.lock());
                 // Close may have started while this thread waited for the GIL.
                 if !state.accepting {
@@ -114,6 +125,11 @@ impl Callback {
                         .as_ref()
                         .expect("open callback clock missing")
                         .clone_ref(py),
+                    state
+                        .result_types
+                        .as_ref()
+                        .expect("open callback result types missing")
+                        .clone_ref(py),
                 )
             };
             let callable = callable.bind(py);
@@ -129,7 +145,25 @@ impl Callback {
                 }
             }
             let bytes = PyBytes::new(py, message);
-            if let Err(error) = callable.call1((timestamp, bytes)) {
+            let result = callable.call1((timestamp, bytes)).and_then(|value| {
+                if value.is_none() || !value.is_instance(result_types.bind(py))? {
+                    return Ok(());
+                }
+                if value.is_instance(&result_types.bind(py).get_item(0)?)?
+                    && PyModule::import(py, "inspect")?
+                        .call_method1("getcoroutinestate", (&value,))?
+                        .extract::<String>()?
+                        == "CORO_CREATED"
+                {
+                    // Closing an unstarted native coroutine runs no user body and
+                    // avoids a second, misleading unawaited-coroutine warning.
+                    value.call_method0("close")?;
+                }
+                Err(PyTypeError::new_err(
+                    "MIDI callback returned deferred work; use a synchronous callback that processes or schedules the message",
+                ))
+            });
+            if let Err(error) = result {
                 error.write_unraisable(py, Some(callable));
             }
         });
@@ -138,7 +172,8 @@ impl Callback {
     pub fn traverse(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         let state = self.recover(self.state.lock());
         visit.call(&state.callable)?;
-        visit.call(&state.clock)
+        visit.call(&state.clock)?;
+        visit.call(&state.result_types)
     }
 
     pub fn last_message_time(&self) -> Option<f64> {
@@ -149,7 +184,11 @@ impl Callback {
         let retired = {
             let mut state = self.recover(self.state.lock());
             state.accepting = false;
-            (state.callable.take(), state.clock.take())
+            (
+                state.callable.take(),
+                state.clock.take(),
+                state.result_types.take(),
+            )
         };
         // Decref can invoke arbitrary Python destructors. Never do it under a lock.
         drop(retired);
@@ -198,6 +237,7 @@ pub fn check_blocking_thread() -> PyResult<()> {
 struct DispatchState {
     callable: Option<Py<PyAny>>,
     clock: Option<Py<PyAny>>,
+    result_types: Option<Py<PyTuple>>,
     last_message_time: Option<f64>,
     accepting: bool,
     active: usize,

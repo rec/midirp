@@ -105,6 +105,7 @@ class MidiInput:
     ) -> MidiInputConnection:
         """Use a synchronous, nongenerator callback.
 
+        Deferred results report TypeError through sys.unraisablehook.
         Callbacks may run before return; initialize their state before opening.
         """
         ...
@@ -113,6 +114,7 @@ class MidiInput:
     ) -> MidiInputConnection:
         """Use a synchronous, nongenerator callback.
 
+        Deferred results report TypeError through sys.unraisablehook.
         Callbacks may run before return; initialize their state before opening.
         """
         ...

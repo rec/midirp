@@ -49,8 +49,10 @@ class Input:
     def connect(
         self, port: InputPort, name: str, callback: Callable[[int, bytes], object]
     ) -> InputConnection:
-        if self.name == "early":
+        if self.name in ("early", "twice"):
             callback(17, b"\x90\x3c\x7f")
+        if self.name == "twice":
+            callback(18, b"\xf8")
         if self.name == "burst":
             for i in range(2048):
                 callback(i, b"\xf8")

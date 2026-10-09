@@ -391,3 +391,27 @@ limits that this mitigation cannot remove.
 All 120 repository tests pass, including the native lifecycle harness. Ruff,
 formatting, ty, pyupgrade, and the scoped diff check pass. No native MIDI ports
 were opened. Release-only CI remains unchanged.
+
+## Deferred callback result mitigation (A3), 2026-10-09
+
+The shared Rust callback bridge now reports returned coroutines, generators,
+async generators, and other awaitables as `TypeError` through
+`sys.unraisablehook`, with the original callable as context. Ordinary results
+remain ignored; later deliveries continue. The check runs in the existing
+callback gate without a callable wrapper. Its cached type references are tracked
+for GC and retired outside the state lock. Only unstarted native coroutines are
+closed to avoid duplicate unawaited-coroutine warnings; suspended coroutines
+and other deferred objects are not executed or cancelled.
+
+Device-free tests cover all four deferred result forms through public input
+connections in both modes, original error context, subsequent delivery, no
+deferred execution, and coroutine warning suppression. A further regression
+checks that a suspended coroutine is reported without cancellation. Resolved
+silent-deferred-result text is removed from A3; callback signature uncertainty,
+thread constraints, and application synchronization remain documented.
+
+All 129 repository tests pass, including 39 ordinary Rust tests and three
+isolated finalization checks through the Python harness. Ruff, formatting, ty,
+pyupgrade, Cargo formatting, Clippy with warnings denied, and the scoped diff
+check pass. No native MIDI ports were opened. The workflow still contains only
+the published-release trigger; no cross-platform CI run was scheduled.
