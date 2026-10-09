@@ -147,6 +147,9 @@ partials and callable objects whose `__call__` has those forms. The library does
 not await or iterate callback results. A synchronous wrapper that returns a
 coroutine or generator cannot be identified reliably at open; its result is
 still ignored. Use a synchronous callback to hand work to your event loop.
+If a callback's signature can be inspected, opening checks that it accepts two
+positional arguments. Incompatible signatures raise `TypeError` before opening;
+uninspectable callables remain accepted without executing them to check.
 
 Initialize all state used by the callback before calling `connect()` or
 `create_virtual()`. Delivery may start during native opening, before the call

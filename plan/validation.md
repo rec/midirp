@@ -241,6 +241,17 @@ Device-free checks cover all three added forms in both modes, including mutation
 of the caller's buffer after the snapshot. All 80 Python checks, Ruff, formatting,
 ty, pyupgrade, and the scoped diff check pass.
 
+## Callback signature admission (A3), 2026-10-09
+
+Opening rejects inspectable callbacks that cannot accept two positional
+arguments, without invoking the callback or consuming client ownership.
+Uninspectable callables remain accepted. Static `__call__` descriptors are
+inspected through their actual callable to avoid inspect.signature dropping a
+valid argument. Deferred-function checks retain their earlier error precedence.
+Device-free checks exercise both opening methods and both modes for incompatible
+signatures, plus valid callable objects, partials, and uninspectable callables.
+All 83 Python checks, Ruff, formatting, ty, pyupgrade, and the scoped diff check pass.
+
 ## Native backend checks
 
 `test/manual/loopback.py` explicitly selects unique temporary software endpoints

@@ -236,7 +236,7 @@ def test_ambiguous_port_ids_are_rejected_before_opening(
     workers[0].wait(timeout=3)
 
 
-@pytest.mark.parametrize("form", ["function", "partial", "object"])
+@pytest.mark.parametrize("form", ["function", "partial", "object", "uninspectable"])
 def test_input_callback_can_receive_during_open_without_being_pickled(
     form: str,
     workers: list[Popen[bytes]],
@@ -249,13 +249,51 @@ def test_input_callback_can_receive_during_open_without_being_pickled(
     class Receiver:
         __call__ = staticmethod(receive)
 
-    callback = {"function": receive, "partial": partial(receive), "object": Receiver()}[
-        form
-    ]
+    class UninspectableReceiver(Receiver):
+        @property
+        def __signature__(self) -> inspect.Signature:
+            raise ValueError("No signature available")
+
+    callback = {
+        "function": receive,
+        "partial": partial(receive),
+        "object": Receiver(),
+        "uninspectable": UninspectableReceiver(),
+    }[form]
     source = midi.MidiInput("early")
     with source.connect(source.ports()[0], "test", callback) as connection:
         assert messages.get(timeout=3) == (17, b"\x90\x3c\x7f")
         assert connection.dropped_messages == 0
+
+
+@pytest.mark.parametrize("isolated", [True, False])
+def test_incompatible_callback_signatures_do_not_consume_the_client(
+    isolated: bool, workers: list[Popen[bytes]]
+) -> None:
+    def one_argument(timestamp: int) -> None:
+        pass
+
+    def extra_argument(timestamp: int, message: bytes, required: int) -> None:
+        pass
+
+    def keyword_only(*, timestamp: int, message: bytes) -> None:
+        pass
+
+    class LocalClient:
+        def __init__(self, name: str) -> None:
+            pass
+
+        def ports(self) -> list[object]:
+            return [object()]
+
+    with patch("midirp._native.MidiInput", LocalClient):
+        source = midi.MidiInput("early", isolated=isolated)
+        for c in (one_argument, extra_argument, keyword_only):
+            with pytest.raises(TypeError, match="two positional arguments"):
+                source.connect(source.ports()[0], "test", c)  # ty: ignore[invalid-argument-type]
+            with pytest.raises(TypeError, match="two positional arguments"):
+                source.create_virtual("test", c)  # ty: ignore[invalid-argument-type]
+            assert source.ports()
 
 
 @pytest.mark.parametrize("isolated", [True, False])

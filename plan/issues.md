@@ -379,8 +379,8 @@ not a claim to bind every optional Rust feature or backend.
 
 ### A3. Callback traps
 
-**Confirmed in source.** Callback argument count is not checked at open. Wrong
-argument count or a callable that raises fails later for every message through
+**Confirmed in source.** An uninspectable callable with incompatible arguments,
+or a callable that raises, fails later for every message through
 `sys.unraisablehook`; it does not raise in the thread that opened the port.
 Return values are ignored. A synchronous wrapper can still return an unawaited
 coroutine or uniterated generator instead of processing messages. Its return

@@ -453,12 +453,36 @@ def validate_open(
     if callback is not None and not callable(callback):
         raise TypeError("MIDI callback must be callable")
     if callback is not None:
-        while isinstance(callback, partial):
-            callback = callback.func
-        for c in (callback, callback.__call__):
+        target = callback
+        while isinstance(target, partial):
+            target = target.func
+        for c in (target, target.__call__):
             if (
                 inspect.iscoroutinefunction(c)
                 or inspect.isgeneratorfunction(c)
                 or inspect.isasyncgenfunction(c)
             ):
                 raise TypeError("MIDI callback must be synchronous and not a generator")
+        signature_callback = callback
+        # inspect.signature(instance) incorrectly removes an argument from a
+        # static __call__. Inspect the actual callable in that case.
+        if isinstance(
+            inspect.getattr_static(type(target), "__call__", None), staticmethod
+        ):
+            signature_callback = target.__call__
+            if isinstance(callback, partial):
+                signature_callback = partial(
+                    signature_callback, *callback.args, **callback.keywords
+                )
+        try:
+            signature = inspect.signature(signature_callback)
+        except (TypeError, ValueError):
+            pass  # Some native callables do not publish a Python signature.
+        else:
+            try:
+                signature.bind(0, b"")
+            except TypeError as error:
+                raise TypeError(
+                    "MIDI callback must accept two positional arguments: "
+                    "timestamp, message"
+                ) from error
