@@ -177,6 +177,21 @@ dependencies, native module placement, unchanged stubs, the typing marker,
 third-party notices, and sdist source completeness. The sdist-to-wheel build
 also checks that the archive can compile independently of the checkout.
 
+## Callback function validation (A3), 2026-10-09
+
+Both input opening methods reject coroutine, generator, and async generator
+functions with `TypeError` before opening native input or starting delivery.
+Checks cover ordinary functions, partials, callable objects, and partials of
+callable objects in both isolation modes. Rejected callbacks leave the client
+available. Synchronous functions, partials, and callable objects still deliver
+the controlled fixture's message during opening.
+
+All 73 Python checks pass, including the existing Rust lifecycle harness; Ruff,
+formatting, ty, pyupgrade, and the scoped diff check pass. These are device-free
+checks. Release-only CI was preserved; this push schedules no matrix run.
+Synchronous wrappers returning deferred objects remain an application concern;
+callback results are still ignored. Other A3 limitations remain in the inventory.
+
 ## Native backend checks
 
 `test/manual/loopback.py` explicitly selects unique temporary software endpoints

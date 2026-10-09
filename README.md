@@ -135,6 +135,13 @@ Timestamps preserve midir's microsecond values and backend origin; do not compar
 unrelated connections' clocks. Return values are ignored. Exceptions are reported
 to `sys.unraisablehook` with the callable as context; later messages still arrive.
 
+Callbacks must execute synchronously. Opening rejects coroutine functions,
+generator functions, and async generator functions with `TypeError`, including
+partials and callable objects whose `__call__` has those forms. The library does
+not await or iterate callback results. A synchronous wrapper that returns a
+coroutine or generator cannot be identified reliably at open; its result is
+still ignored. Use a synchronous callback to hand work to your event loop.
+
 Initialize all state used by the callback before calling `connect()` or
 `create_virtual()`. Delivery may start during native opening, before the call
 returns and its result is assigned. The callback must not depend on the variable

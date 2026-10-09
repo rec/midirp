@@ -67,12 +67,18 @@ class MidiInput:
         port_name: str,
         callback: Callable[[int, bytes], object],
     ) -> MidiInputConnection:
-        """Callbacks may run before return; initialize their state before opening."""
+        """Use a synchronous, nongenerator callback.
+
+        Callbacks may run before return; initialize their state before opening.
+        """
         ...
     def create_virtual(
         self, port_name: str, callback: Callable[[int, bytes], object]
     ) -> MidiInputConnection:
-        """Callbacks may run before return; initialize their state before opening."""
+        """Use a synchronous, nongenerator callback.
+
+        Callbacks may run before return; initialize their state before opening.
+        """
         ...
 
 class MidiOutput:

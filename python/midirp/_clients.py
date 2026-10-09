@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import sys
 from collections.abc import Callable
+from functools import partial
 from types import TracebackType
 from typing import cast
 
@@ -449,3 +451,13 @@ def validate_open(
         raise TypeError("MIDI connection names must be strings")
     if callback is not None and not callable(callback):
         raise TypeError("MIDI callback must be callable")
+    if callback is not None:
+        while isinstance(callback, partial):
+            callback = callback.func
+        for c in (callback, callback.__call__):
+            if (
+                inspect.iscoroutinefunction(c)
+                or inspect.isgeneratorfunction(c)
+                or inspect.isasyncgenfunction(c)
+            ):
+                raise TypeError("MIDI callback must be synchronous and not a generator")

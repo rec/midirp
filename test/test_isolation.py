@@ -4,7 +4,8 @@ import gc
 import inspect
 import sys
 import weakref
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from functools import partial
 from pathlib import Path
 from queue import Queue
 from subprocess import Popen
@@ -192,7 +193,9 @@ def test_ambiguous_port_ids_are_rejected_before_opening(
     workers[0].wait(timeout=3)
 
 
+@pytest.mark.parametrize("form", ["function", "partial", "object"])
 def test_input_callback_can_receive_during_open_without_being_pickled(
+    form: str,
     workers: list[Popen[bytes]],
 ) -> None:
     messages: Queue[tuple[int, bytes]] = Queue()
@@ -200,10 +203,58 @@ def test_input_callback_can_receive_during_open_without_being_pickled(
     def receive(timestamp: int, message: bytes) -> None:
         messages.put((timestamp, message))
 
+    class Receiver:
+        __call__ = staticmethod(receive)
+
+    callback = {"function": receive, "partial": partial(receive), "object": Receiver()}[
+        form
+    ]
     source = midi.MidiInput("early")
-    with source.connect(source.ports()[0], "test", receive) as connection:
+    with source.connect(source.ports()[0], "test", callback) as connection:
         assert messages.get(timeout=3) == (17, b"\x90\x3c\x7f")
         assert connection.dropped_messages == 0
+
+
+@pytest.mark.parametrize("isolated", [True, False])
+@pytest.mark.parametrize("operation", ["connect", "create_virtual"])
+@pytest.mark.parametrize("kind", ["coroutine", "generator", "async_generator"])
+def test_deferred_callbacks_are_rejected_without_consuming_the_client(
+    isolated: bool, operation: str, kind: str, workers: list[Popen[bytes]]
+) -> None:
+    async def coroutine(timestamp: int, message: bytes) -> None:
+        pass
+
+    def generator(timestamp: int, message: bytes) -> Iterator[None]:
+        yield None
+
+    async def async_generator(timestamp: int, message: bytes) -> AsyncIterator[None]:
+        yield None
+
+    callback: Callable[[int, bytes], object] = {
+        "coroutine": coroutine,
+        "generator": generator,
+        "async_generator": async_generator,
+    }[kind]
+
+    class Receiver:
+        __call__ = staticmethod(callback)
+
+    class LocalClient:
+        def __init__(self, name: str) -> None:
+            pass
+
+        def ports(self) -> list[object]:
+            return [object()]
+
+    with patch("midirp._native.MidiInput", LocalClient):
+        source = midi.MidiInput("early", isolated=isolated)
+        for c in (callback, partial(callback), Receiver(), partial(Receiver())):
+            with pytest.raises(TypeError, match="synchronous and not a generator"):
+                if operation == "connect":
+                    source.connect(source.ports()[0], "test", c)
+                else:
+                    source.create_virtual("test", c)
+            assert source.ports()
 
 
 def test_parent_queue_drops_new_messages_and_counts_both_queue_stages() -> None:
