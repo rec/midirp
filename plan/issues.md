@@ -406,10 +406,6 @@ fail during interpreter shutdown through `try_attach`, skipping Python delivery.
 **Validation gaps.** Native exception detail remains a human-readable string
 rather than a structured error kind. Cross-platform SysEx framing remains a
 validation gap.
-The stub describes handles as unhashable but does not explicitly declare a
-`__hash__ = None` surface; static-tool behavior should be checked before calling
-this a type-checker defect.
-
 `requires-python = ">=3.11"` has no upper bound, while validation covers only
 standard CPython 3.11 through 3.14. A source build on a later interpreter is not
 validated merely because package metadata permits an attempted install. Linux

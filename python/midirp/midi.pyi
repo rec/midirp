@@ -40,12 +40,16 @@ class Ignore:
 class MidiInputPort:
     """An opaque, unhashable input-port handle returned by discovery."""
 
+    __hash__: ClassVar[None]
+
     def id(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
     def __ne__(self, other: object) -> bool: ...
 
 class MidiOutputPort:
     """An opaque, unhashable output-port handle returned by discovery."""
+
+    __hash__: ClassVar[None]
 
     def id(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...

@@ -221,6 +221,17 @@ SysEx and library resource limits stay in the issue inventory.
 Documentation review and the scoped diff check pass. No Python or data file
 changed, so the test suite was not rerun for this documentation-only commit.
 
+## Unhashable port typing (A4), 2026-10-09
+
+Both public port stubs now declare `__hash__: ClassVar[None]`, matching their
+existing runtime behavior. A focused type-checker probe returned each port as
+`collections.abc.Hashable`: ty accepted both before the change and now rejects
+both with incompatible `__hash__` diagnostics. The project type check still
+passes. This establishes the corrected protocol surface with the existing ty
+checker; it does not claim every checker diagnoses every direct `hash()` call.
+All 74 Python checks, Ruff, formatting, ty, pyupgrade, and the scoped diff check
+pass after the stub change.
+
 ## Native backend checks
 
 `test/manual/loopback.py` explicitly selects unique temporary software endpoints
