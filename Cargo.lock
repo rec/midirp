@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "midirp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "midir",
  "pyo3",
