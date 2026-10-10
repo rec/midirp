@@ -323,8 +323,11 @@ fail during interpreter shutdown through `try_attach`, skipping Python delivery.
 rather than a structured error kind. Cross-platform SysEx framing remains a
 validation gap.
 `requires-python = ">=3.11"` has no upper bound, while validation covers only
-standard CPython 3.11 through 3.14. A source build on a later interpreter is not
-validated merely because package metadata permits an attempted install. Linux
+standard CPython 3.11 through 3.14 across the release matrix, plus local macOS
+arm64 builds and unit checks on CPython 3.15. Native CoreMIDI initialization
+failed during the 3.15 check and a 3.11 comparison; native I/O on 3.15 remains
+unvalidated. A source build on a later interpreter is not validated merely
+because package metadata permits an attempted install. Linux
 needs sequencer availability and permissions independently of wheel import;
 Windows devices may be exclusively owned elsewhere. musl, PyPy, free-threaded
 Python, other architectures, and alternate optional midir backends are outside

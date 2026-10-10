@@ -415,3 +415,37 @@ isolated finalization checks through the Python harness. Ruff, formatting, ty,
 pyupgrade, Cargo formatting, Clippy with warnings denied, and the scoped diff
 check pass. No native MIDI ports were opened. The workflow still contains only
 the published-release trigger; no cross-platform CI run was scheduled.
+
+## CPython 3.15 compatibility, 2026-10-10
+
+Host: macOS 14.5 arm64; Homebrew standard GIL-enabled CPython 3.15.0;
+Rust 1.99.0; pinned midir 0.11.0, PyO3 0.29.3, and maturin 1.15.0.
+Separate environments preserve the checkout's Python 3.11 default.
+`pyproject.toml` now declares the Python 3.15 classifier; `requires-python`
+remains `>=3.11`. No dependency versions, lockfile, Python minimum, or release
+workflow changed. The release matrix still covers 3.11–3.14 and runs only on
+published releases.
+
+All 129 repository tests pass under 3.15, including 39 ordinary Rust tests and
+three isolated finalization checks through the Python lifecycle harness. A
+release wheel built from the source archive passes all 128 applicable tests
+outside the checkout. Wheel/source metadata checks confirm the 3.15 classifier,
+Python minimum, lack of runtime dependencies, and current packaged Python
+sources/stubs. The artifact is
+`midirp-0.1.0-cp315-cp315-macosx_11_0_arm64.whl`.
+
+Ruff, formatting, ty, pyupgrade with the retained 3.11 minimum, Cargo formatting,
+and the scoped diff check pass. Strict Clippy with Rust 1.99 fails on the existing
+`AtomicU8::fetch_update` deprecation in `src/lifecycle.rs:104`; the successful
+release build reports the same warning. This is a compiler-version finding,
+not a Python 3.15 build failure. No warning suppression, Rust-version increase,
+or unrelated implementation change was made.
+
+Eight authorized software-only CoreMIDI close/reopen and SysEx checks were
+attempted against the installed 3.15 wheel in both execution modes. All failed
+at client construction with `InitError`, before any virtual endpoint was
+created. The two close/reopen comparison cases also fail at initialization
+under the checkout's CPython 3.11.7. This does not establish a 3.15-specific
+defect; the native initialization failure's cause remains undiagnosed. Native
+MIDI I/O under 3.15, Linux/Windows 3.15 builds, and cross-platform 3.15 fault
+behavior remain unvalidated. No hardware was accessed.
