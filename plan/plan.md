@@ -186,11 +186,10 @@ src/
     input.rs               # Input client, connection, callback bridge
     output.rs              # Output client and connection
     errors.rs              # Error translation
-python/
-    midirp/
-        __init__.py        # Empty
-        midi.pyi           # Public native API signatures and docstrings
-        py.typed
+midirp/
+    __init__.py            # Empty
+    midi.pyi               # Public native API signatures and docstrings
+    py.typed
 test/
     test_contract.py
     test_lifecycle.py
@@ -203,7 +202,7 @@ plan/
     ci.yml
 ```
 
-Configure maturin with `python-source = "python"` and
+Configure maturin with `python-source = "."` and
 `module-name = "midirp.midi"`. Set the Rust module name accordingly and build a
 `cdylib`. The canonical import is `from midirp.midi import MidiInput`.
 Keep `__init__.py` empty and define native objects' Python module as

@@ -39,7 +39,7 @@ def test_wheels_include_typed_api_and_matching_version_metadata() -> None:
             assert any(n.endswith("/licenses/THIRD_PARTY_NOTICES.md") for n in names)
             assert (
                 archive.read("midirp/midi.pyi")
-                == (project / "python" / "midirp" / "midi.pyi").read_bytes()
+                == (project / "midirp" / "midi.pyi").read_bytes()
             )
             if "manylinux" in w.name:
                 assert any(".libs/libasound" in n for n in names)
@@ -62,12 +62,12 @@ def test_source_distribution_contains_build_typing_and_test_sources() -> None:
                 "README.md",
                 "LICENSE",
                 "THIRD_PARTY_NOTICES.md",
-                "python/midirp/midi.pyi",
-                "python/midirp/py.typed",
-                "python/midirp/_clients.py",
-                "python/midirp/_transport.py",
-                "python/midirp/_worker.py",
-                "python/midirp/_native.pyi",
+                "midirp/midi.pyi",
+                "midirp/py.typed",
+                "midirp/_clients.py",
+                "midirp/_transport.py",
+                "midirp/_worker.py",
+                "midirp/_native.pyi",
                 "src/lib.rs",
                 "src/lifecycle.rs",
                 "test/native/midirp_callbacks.py",

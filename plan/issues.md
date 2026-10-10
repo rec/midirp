@@ -42,7 +42,7 @@ The successful CoreMIDI burst is one measurement, not a throughput guarantee.
 Primary binding evidence is in [state.rs](../src/state.rs),
 [lifecycle.rs](../src/lifecycle.rs), [callback.rs](../src/callback.rs),
 [input.rs](../src/input.rs), [output.rs](../src/output.rs),
-[ignore.rs](../src/ignore.rs), and [the public stub](../python/midirp/midi.pyi).
+[ignore.rs](../src/ignore.rs), and [the public stub](../midirp/midi.pyi).
 Upstream evidence was read from the exact Cargo registry sources selected by
 [Cargo.lock](../Cargo.lock). Source links below identify those versions; line
 references and function names refer to that pinned source, not a newer release.

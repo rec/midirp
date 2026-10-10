@@ -36,7 +36,7 @@ dev = [
 ]
 
 [tool.maturin]
-python-source = "python"
+python-source = "."
 module-name = "midirp.midi"
 locked = true
 
@@ -46,9 +46,9 @@ cache-keys = [
     { file = "Cargo.toml" },
     { file = "Cargo.lock" },
     { file = "src/**/*.rs" },
-    { file = "python/midirp/*.py" },
-    { file = "python/midirp/*.pyi" },
-    { file = "python/midirp/py.typed" },
+    { file = "midirp/*.py" },
+    { file = "midirp/*.pyi" },
+    { file = "midirp/py.typed" },
     { file = "README.md" },
 ]
 

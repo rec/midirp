@@ -359,9 +359,9 @@ interpreter. Standard GIL-enabled CPython is the tested contract.
 
 ```sh
 uv run --frozen pytest
-uv run --frozen ruff check --select B,E,F,I python test
-uv run --frozen ruff format --check python test
-uv run --frozen ty check python/midirp test
+uv run --frozen ruff check --select B,E,F,I midirp test
+uv run --frozen ruff format --check midirp test
+uv run --frozen ty check midirp test
 cargo fmt --check
 PYO3_PYTHON="$PWD/.venv/bin/python" cargo clippy --locked --all-targets -- -D warnings
 PYO3_PYTHON="$PWD/.venv/bin/python" cargo test --locked

@@ -4,5 +4,5 @@
 __pycache__/
 /.pytest_cache/
 /.ruff_cache/
-/python/midirp/*.so
-/python/midirp/*.pyd
+/midirp/*.so
+/midirp/*.pyd

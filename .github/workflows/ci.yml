@@ -68,9 +68,9 @@ jobs:
             printf '::error title=Python tests::%s\n' "$report"
           fi
           exit "$test_status"
-      - run: uv run --frozen ruff check --select B,E,F,I python test
-      - run: uv run --frozen ruff format --check python test
-      - run: uv run --frozen ty check python/midirp test
+      - run: uv run --frozen ruff check --select B,E,F,I midirp test
+      - run: uv run --frozen ruff format --check midirp test
+      - run: uv run --frozen ty check midirp test
       - name: Build wheel from sdist
         uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
         with:
